@@ -124,6 +124,9 @@ func (p *Pool) CreateGateway(ctx context.Context, visibility string, index int) 
 			Name:     "https",
 			Protocol: gwapiv1.HTTPSProtocolType,
 			Port:     443,
+			TLS: &gwapiv1.ListenerTLSConfig{
+				Mode: ptrTo(gwapiv1.TLSModeTerminate),
+			},
 		},
 		{
 			Name:     "http",
@@ -140,6 +143,11 @@ func (p *Pool) CreateGateway(ctx context.Context, visibility string, index int) 
 		Name:      name,
 		Namespace: p.namespace,
 	}, nil
+}
+
+// ptrTo returns a pointer to the given value
+func ptrTo[T any](v T) *T {
+	return &v
 }
 
 // GetNextGatewayIndex returns the next available Gateway index
