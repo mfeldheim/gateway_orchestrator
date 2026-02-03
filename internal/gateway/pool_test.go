@@ -16,11 +16,11 @@ func TestPool_SelectGateway(t *testing.T) {
 	_ = gwapiv1.AddToScheme(scheme)
 
 	tests := []struct {
-		name           string
+		name             string
 		existingGateways []gwapiv1.Gateway
-		visibility     string
-		wantGateway    string
-		wantNil        bool
+		visibility       string
+		wantGateway      string
+		wantNil          bool
 	}{
 		{
 			name: "select gateway with capacity",
@@ -53,7 +53,7 @@ func TestPool_SelectGateway(t *testing.T) {
 						Namespace: "edge",
 						Annotations: map[string]string{
 							"gateway.opendi.com/visibility":        "internet-facing",
-							"gateway.opendi.com/certificate-count": "20", // At limit
+							"gateway.opendi.com/certificate-count": "20",  // At limit
 							"gateway.opendi.com/rule-count":        "100", // At limit
 						},
 					},
