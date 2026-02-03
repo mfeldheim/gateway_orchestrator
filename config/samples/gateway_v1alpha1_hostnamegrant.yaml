@@ -1,0 +1,13 @@
+apiVersion: gateway.opendi.com/v1alpha1
+kind: HostnameGrant
+metadata:
+  name: example-grant
+  namespace: edge
+spec:
+  # Namespace that is allowed to use these hostnames
+  namespace: "my-app"
+  
+  # List of hostnames this namespace can use
+  hostnames:
+    - "test.opendi.com"
+    - "api.opendi.com"

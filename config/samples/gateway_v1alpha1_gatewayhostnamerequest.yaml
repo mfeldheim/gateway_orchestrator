@@ -1,0 +1,22 @@
+apiVersion: gateway.opendi.com/v1alpha1
+kind: GatewayHostnameRequest
+metadata:
+  name: example-hostname
+  namespace: my-app
+spec:
+  # Route53 hosted zone ID (must already exist in your AWS account)
+  zoneId: "Z1234567890ABC"
+  
+  # Fully qualified domain name to expose
+  hostname: "test.opendi.com"
+  
+  # Environment (optional): dev, staging, or prod
+  environment: "dev"
+  
+  # Visibility (optional): internet-facing or internal
+  # Default: internet-facing
+  visibility: "internet-facing"
+  
+  # GatewayClass to use (optional)
+  # Default: aws-alb
+  gatewayClass: "aws-alb"

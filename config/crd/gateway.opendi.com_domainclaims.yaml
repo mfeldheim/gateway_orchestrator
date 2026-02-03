@@ -1,0 +1,97 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: domainclaims.gateway.opendi.com
+spec:
+  group: gateway.opendi.com
+  names:
+    kind: DomainClaim
+    listKind: DomainClaimList
+    plural: domainclaims
+    shortNames:
+    - dc
+    singular: domainclaim
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.hostname
+      name: Hostname
+      type: string
+    - jsonPath: .spec.ownerRef.namespace
+      name: Owner
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          DomainClaim is the Schema for the domainclaims API
+          Implements atomic first-come-first-serve for (zoneId, hostname) pairs
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: DomainClaimSpec defines the desired state of DomainClaim
+            properties:
+              hostname:
+                description: Hostname is the claimed FQDN
+                type: string
+              ownerRef:
+                description: OwnerRef references the GatewayHostnameRequest that owns
+                  this claim
+                properties:
+                  name:
+                    description: Name of the owning GatewayHostnameRequest
+                    type: string
+                  namespace:
+                    description: Namespace of the owning GatewayHostnameRequest
+                    type: string
+                  uid:
+                    description: UID of the owning GatewayHostnameRequest
+                    type: string
+                required:
+                - name
+                - namespace
+                - uid
+                type: object
+              zoneId:
+                description: ZoneId is the Route53 hosted zone ID
+                type: string
+            required:
+            - hostname
+            - ownerRef
+            - zoneId
+            type: object
+          status:
+            description: DomainClaimStatus defines the observed state of DomainClaim
+            properties:
+              claimedAt:
+                description: ClaimedAt is the timestamp when the claim was established
+                format: date-time
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

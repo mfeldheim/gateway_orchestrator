@@ -1,0 +1,11 @@
+apiVersion: gateway.opendi.com/v1alpha1
+kind: DomainClaim
+metadata:
+  name: example-claim
+spec:
+  zoneId: "Z1234567890ABC"
+  hostname: "test.opendi.com"
+  ownerRef:
+    namespace: "my-app"
+    name: "example-hostname"
+    uid: "12345678-1234-1234-1234-123456789012"
