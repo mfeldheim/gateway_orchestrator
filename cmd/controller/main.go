@@ -89,6 +89,7 @@ func main() {
 	if err = (&controller.GatewayHostnameRequestReconciler{
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
+		Recorder:      mgr.GetEventRecorderFor("gateway-orchestrator"),
 		ACMClient:     acmClient,
 		Route53Client: route53Client,
 		GatewayPool:   gatewayPool,

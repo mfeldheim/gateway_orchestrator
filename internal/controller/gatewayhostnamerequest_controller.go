@@ -38,7 +38,8 @@ const (
 // GatewayHostnameRequestReconciler reconciles a GatewayHostnameRequest object
 type GatewayHostnameRequestReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
 
 	ACMClient     aws.ACMClient
 	Route53Client aws.Route53Client
@@ -94,6 +95,7 @@ func (r *GatewayHostnameRequestReconciler) reconcileNormal(ctx context.Context, 
 	if err := r.validateRequest(ghr); err != nil {
 		r.setCondition(ghr, ConditionTypeReady, metav1.ConditionFalse, "ValidationFailed", err.Error())
 		_ = r.Status().Update(ctx, ghr)
+		r.Recorder.Eventf(ghr, corev1.EventTypeWarning, "ValidationFailed", "Request validation failed: %v", err)
 		return ctrl.Result{}, err
 	}
 
@@ -102,14 +104,17 @@ func (r *GatewayHostnameRequestReconciler) reconcileNormal(ctx context.Context, 
 	if err != nil {
 		r.setCondition(ghr, ConditionTypeClaimed, metav1.ConditionFalse, "ClaimFailed", err.Error())
 		_ = r.Status().Update(ctx, ghr)
+		r.Recorder.Eventf(ghr, corev1.EventTypeWarning, "ClaimFailed", "Failed to claim domain: %v", err)
 		return ctrl.Result{}, err
 	}
 	if !claimed {
 		r.setCondition(ghr, ConditionTypeClaimed, metav1.ConditionFalse, "AlreadyClaimed", "Hostname already claimed by another request")
 		_ = r.Status().Update(ctx, ghr)
+		r.Recorder.Event(ghr, corev1.EventTypeWarning, "AlreadyClaimed", "Hostname already claimed by another request")
 		return ctrl.Result{}, nil // Don't requeue, claim conflict
 	}
 	r.setCondition(ghr, ConditionTypeClaimed, metav1.ConditionTrue, "Claimed", "Domain successfully claimed")
+	r.Recorder.Event(ghr, corev1.EventTypeNormal, "Claimed", "Domain successfully claimed")
 
 	// Step 3: Request ACM certificate
 	if ghr.Status.CertificateArn == "" {
@@ -145,6 +150,7 @@ func (r *GatewayHostnameRequestReconciler) reconcileNormal(ctx context.Context, 
 		if err != nil {
 			r.setCondition(ghr, ConditionTypeCertificateIssued, metav1.ConditionFalse, "CheckFailed", err.Error())
 			_ = r.Status().Update(ctx, ghr)
+			r.Recorder.Eventf(ghr, corev1.EventTypeWarning, "CertificateCheckFailed", "Failed to check certificate status: %v", err)
 			return ctrl.Result{}, err
 		}
 		if !issued {
@@ -154,6 +160,7 @@ func (r *GatewayHostnameRequestReconciler) reconcileNormal(ctx context.Context, 
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 		r.setCondition(ghr, ConditionTypeCertificateIssued, metav1.ConditionTrue, "Issued", "Certificate issued by ACM")
+		r.Recorder.Event(ghr, corev1.EventTypeNormal, "CertificateIssued", "ACM certificate issued")
 		if err := r.Status().Update(ctx, ghr); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -164,9 +171,11 @@ func (r *GatewayHostnameRequestReconciler) reconcileNormal(ctx context.Context, 
 		if err := r.ensureGatewayAssignment(ctx, ghr); err != nil {
 			r.setCondition(ghr, ConditionTypeListenerAttached, metav1.ConditionFalse, "AttachmentFailed", err.Error())
 			_ = r.Status().Update(ctx, ghr)
+			r.Recorder.Eventf(ghr, corev1.EventTypeWarning, "GatewayAssignmentFailed", "Failed to assign gateway: %v", err)
 			return ctrl.Result{}, err
 		}
 		r.setCondition(ghr, ConditionTypeListenerAttached, metav1.ConditionTrue, "Attached", "Certificate attached to Gateway")
+		r.Recorder.Eventf(ghr, corev1.EventTypeNormal, "GatewayAssigned", "Assigned to gateway %s", ghr.Status.AssignedGateway)
 		if err := r.Status().Update(ctx, ghr); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -198,6 +207,7 @@ func (r *GatewayHostnameRequestReconciler) reconcileNormal(ctx context.Context, 
 
 	// Step 9: Mark as Ready
 	r.setCondition(ghr, ConditionTypeReady, metav1.ConditionTrue, "Ready", "Hostname request fully provisioned")
+	r.Recorder.Event(ghr, corev1.EventTypeNormal, "Ready", "Hostname fully provisioned")
 	if err := r.Status().Update(ctx, ghr); err != nil {
 		return ctrl.Result{}, err
 	}
