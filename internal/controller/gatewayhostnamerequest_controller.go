@@ -3,10 +3,13 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -148,7 +151,7 @@ func (r *GatewayHostnameRequestReconciler) reconcileNormal(ctx context.Context, 
 			logger.Info("Certificate not yet issued, requeuing", "hostname", ghr.Spec.Hostname)
 			r.setCondition(ghr, ConditionTypeCertificateIssued, metav1.ConditionFalse, "PendingIssuance", "Waiting for ACM to issue certificate")
 			_ = r.Status().Update(ctx, ghr)
-			return ctrl.Result{RequeueAfter: 30 * 1000000000}, nil // 30 seconds
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 		r.setCondition(ghr, ConditionTypeCertificateIssued, metav1.ConditionTrue, "Issued", "Certificate issued by ACM")
 		if err := r.Status().Update(ctx, ghr); err != nil {
@@ -175,7 +178,7 @@ func (r *GatewayHostnameRequestReconciler) reconcileNormal(ctx context.Context, 
 			// If LoadBalancer not ready yet, requeue
 			if err.Error() == "gateway "+ghr.Status.AssignedGateway+" does not have LoadBalancer address yet" {
 				logger.Info("Waiting for LoadBalancer to be provisioned", "gateway", ghr.Status.AssignedGateway)
-				return ctrl.Result{RequeueAfter: 30 * 1000000000}, nil // 30 seconds
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 			}
 			r.setCondition(ghr, ConditionTypeDnsAliasReady, metav1.ConditionFalse, "AliasFailed", err.Error())
 			_ = r.Status().Update(ctx, ghr)
