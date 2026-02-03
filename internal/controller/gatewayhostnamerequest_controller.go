@@ -53,6 +53,7 @@ type GatewayHostnameRequestReconciler struct {
 //+kubebuilder:rbac:groups=gateway.opendi.com,resources=gatewayhostnamerequests/finalizers,verbs=update
 //+kubebuilder:rbac:groups=gateway.opendi.com,resources=domainclaims,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch;create;update;patch
+//+kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;update;patch
 
 // Reconcile implements the reconciliation loop
 func (r *GatewayHostnameRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -233,7 +234,11 @@ func (r *GatewayHostnameRequestReconciler) reconcileNormal(ctx context.Context, 
 		}
 	}
 
-	// Step 8: Configure allowedRoutes
+	// Step 8: Label namespace for gateway access and configure allowedRoutes
+	if err := r.ensureNamespaceLabel(ctx, ghr); err != nil {
+		logger.Info("Failed to label namespace for gateway access", "error", err.Error())
+		// Don't fail reconciliation for this, just log it
+	}
 	if err := r.ensureAllowedRoutes(ctx, ghr); err != nil {
 		logger.Info("Failed to configure allowedRoutes, continuing anyway", "error", err.Error())
 		// Don't fail reconciliation for this, just log it
@@ -288,6 +293,11 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 		} else {
 			logger.Info("Removed certificate from gateway", "gateway", ghr.Status.AssignedGateway)
 		}
+	}
+
+	// 2.5. Remove namespace label for gateway access
+	if err := r.removeNamespaceLabel(ctx, ghr); err != nil {
+		logger.Error(err, "Failed to remove namespace label", "namespace", ghr.Namespace)
 	}
 
 	// 3. Delete DNS validation records
