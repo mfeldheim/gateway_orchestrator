@@ -34,6 +34,14 @@ type GatewayHostnameRequestSpec struct {
 
 // GatewayHostnameRequestStatus defines the observed state of GatewayHostnameRequest
 type GatewayHostnameRequestStatus struct {
+	// ObservedGeneration is the generation of the spec that was last reconciled
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// ObservedSpecHash is a hash of the spec fields that require re-provisioning when changed
+	// +optional
+	ObservedSpecHash string `json:"observedSpecHash,omitempty"`
+
 	// AssignedGateway is the name of the Gateway this hostname is assigned to
 	// +optional
 	AssignedGateway string `json:"assignedGateway,omitempty"`
