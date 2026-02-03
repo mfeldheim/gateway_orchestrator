@@ -137,10 +137,10 @@ func TestExtractRegionFromALBDNS(t *testing.T) {
 func TestExtractAndGetHostedZone(t *testing.T) {
 	// Integration test: extract region and get hosted zone
 	tests := []struct {
-		name          string
-		albDNS        string
-		wantZoneID    string
-		wantError     bool
+		name       string
+		albDNS     string
+		wantZoneID string
+		wantError  bool
 	}{
 		{
 			name:       "complete flow us-east-1",

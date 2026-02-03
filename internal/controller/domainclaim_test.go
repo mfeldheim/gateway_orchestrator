@@ -48,11 +48,11 @@ func TestReconciler_ensureDomainClaim(t *testing.T) {
 	_ = gatewayv1alpha1.AddToScheme(scheme)
 
 	tests := []struct {
-		name           string
-		ghr            *gatewayv1alpha1.GatewayHostnameRequest
-		existingClaim  *gatewayv1alpha1.DomainClaim
-		wantClaimed    bool
-		wantErr        bool
+		name          string
+		ghr           *gatewayv1alpha1.GatewayHostnameRequest
+		existingClaim *gatewayv1alpha1.DomainClaim
+		wantClaimed   bool
+		wantErr       bool
 	}{
 		{
 			name: "no existing claim - should succeed",

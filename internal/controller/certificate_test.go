@@ -119,10 +119,10 @@ func TestReconciler_checkCertificateStatus(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name         string
-		certStatus   string
-		wantIssued   bool
-		wantErr      bool
+		name       string
+		certStatus string
+		wantIssued bool
+		wantErr    bool
 	}{
 		{
 			name:       "pending validation",

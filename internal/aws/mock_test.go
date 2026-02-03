@@ -10,16 +10,16 @@ func TestMockACMClient_RequestCertificate(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name     string
-		domain   string
-		tags     map[string]string
-		wantErr  bool
+		name    string
+		domain  string
+		tags    map[string]string
+		wantErr bool
 	}{
 		{
 			name:   "request certificate for domain",
 			domain: "test.example.com",
 			tags: map[string]string{
-				"managed-by": "gateway-orchestrator",
+				"managed-by":  "gateway-orchestrator",
 				"environment": "dev",
 			},
 			wantErr: false,
@@ -115,8 +115,8 @@ func TestMockRoute53Client_CreateAndGetRecord(t *testing.T) {
 	ctx := context.Background()
 
 	record := DNSRecord{
-		Name: "test.example.com",
-		Type: "CNAME",
+		Name:  "test.example.com",
+		Type:  "CNAME",
 		Value: "_validation.acm.aws.com",
 		TTL:   300,
 	}
