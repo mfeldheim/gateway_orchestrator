@@ -455,7 +455,12 @@ func (r *GatewayHostnameRequestReconciler) cleanupForReprovisioning(ctx context.
 		}
 	}
 
-	// Step 3: Delete DNS validation records
+	// Step 3: Remove namespace label for gateway access
+	if err := r.removeNamespaceLabel(ctx, ghr); err != nil {
+		logger.Error(err, "Failed to remove namespace label during reprovisioning", "namespace", ghr.Namespace)
+	}
+
+	// Step 4: Delete DNS validation records
 	if ghr.Status.CertificateArn != "" {
 		validationRecords, err := r.ACMClient.GetValidationRecords(ctx, ghr.Status.CertificateArn)
 		if err == nil {
@@ -474,7 +479,7 @@ func (r *GatewayHostnameRequestReconciler) cleanupForReprovisioning(ctx context.
 		}
 	}
 
-	// Step 4: Delete ACM certificate (best effort, may fail if still in use)
+	// Step 5: Delete ACM certificate (best effort, may fail if still in use)
 	if ghr.Status.CertificateArn != "" {
 		if err := r.ACMClient.DeleteCertificate(ctx, ghr.Status.CertificateArn); err != nil {
 			logger.Error(err, "Failed to delete ACM certificate during reprovisioning (may still be in use)", "arn", ghr.Status.CertificateArn)
@@ -483,7 +488,7 @@ func (r *GatewayHostnameRequestReconciler) cleanupForReprovisioning(ctx context.
 		}
 	}
 
-	// Step 5: Release DomainClaim
+	// Step 6: Release DomainClaim
 	if err := r.deleteDomainClaim(ctx, ghr); err != nil {
 		logger.Error(err, "Failed to delete domain claim during reprovisioning")
 	} else {

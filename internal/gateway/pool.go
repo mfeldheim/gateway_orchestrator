@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
@@ -43,14 +45,25 @@ type GatewayInfo struct {
 }
 
 // SelectGateway chooses an appropriate Gateway from the pool using first-fit
-func (p *Pool) SelectGateway(ctx context.Context, visibility string) (*GatewayInfo, error) {
+// If selector is specified, only Gateways matching the label selector will be considered
+func (p *Pool) SelectGateway(ctx context.Context, visibility string, selector *metav1.LabelSelector) (*GatewayInfo, error) {
 	// List all Gateways in the namespace
 	var gatewayList gwapiv1.GatewayList
 	if err := p.client.List(ctx, &gatewayList, client.InNamespace(p.namespace)); err != nil {
 		return nil, fmt.Errorf("failed to list gateways: %w", err)
 	}
 
-	// Filter by gatewayClass and visibility
+	// Convert selector to labels.Selector for matching
+	var labelSelector labels.Selector
+	if selector != nil {
+		var err error
+		labelSelector, err = metav1.LabelSelectorAsSelector(selector)
+		if err != nil {
+			return nil, fmt.Errorf("invalid gateway selector: %w", err)
+		}
+	}
+
+	// Filter by gatewayClass, visibility, and optional label selector
 	for _, gw := range gatewayList.Items {
 		if string(gw.Spec.GatewayClassName) != p.gatewayClass {
 			continue
@@ -59,6 +72,11 @@ func (p *Pool) SelectGateway(ctx context.Context, visibility string) (*GatewayIn
 		// Check annotations for visibility
 		gwVisibility := gw.Annotations["gateway.opendi.com/visibility"]
 		if gwVisibility != visibility {
+			continue
+		}
+
+		// Check label selector if specified
+		if labelSelector != nil && !labelSelector.Matches(labels.Set(gw.Labels)) {
 			continue
 		}
 

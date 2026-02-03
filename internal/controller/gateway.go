@@ -58,13 +58,16 @@ func (r *GatewayHostnameRequestReconciler) ensureGatewayAssignment(ctx context.C
 		visibility = "internet-facing"
 	}
 
-	gwInfo, err := r.GatewayPool.SelectGateway(ctx, visibility)
+	gwInfo, err := r.GatewayPool.SelectGateway(ctx, visibility, ghr.Spec.GatewaySelector)
 	if err != nil {
 		return fmt.Errorf("failed to select gateway: %w", err)
 	}
 
-	// If no Gateway found with capacity, create a new one
+	// If no Gateway found with capacity, create a new one (unless a selector is specified)
 	if gwInfo == nil {
+		if ghr.Spec.GatewaySelector != nil {
+			return fmt.Errorf("no Gateway matching selector with available capacity")
+		}
 		logger.Info("No Gateway with capacity found, creating new Gateway")
 		index, err := r.GatewayPool.GetNextGatewayIndex(ctx)
 		if err != nil {
