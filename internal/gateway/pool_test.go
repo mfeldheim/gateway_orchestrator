@@ -19,8 +19,10 @@ func TestPool_SelectGateway(t *testing.T) {
 		name             string
 		existingGateways []gwapiv1.Gateway
 		visibility       string
+		selector         *metav1.LabelSelector
 		wantGateway      string
 		wantNil          bool
+		wantErr          bool
 	}{
 		{
 			name: "select gateway with capacity",
@@ -41,6 +43,7 @@ func TestPool_SelectGateway(t *testing.T) {
 				},
 			},
 			visibility:  "internet-facing",
+			selector:    nil,
 			wantGateway: "gw-01",
 			wantNil:     false,
 		},
@@ -63,6 +66,7 @@ func TestPool_SelectGateway(t *testing.T) {
 				},
 			},
 			visibility:  "internet-facing",
+			selector:    nil,
 			wantGateway: "",
 			wantNil:     true,
 		},
@@ -84,6 +88,7 @@ func TestPool_SelectGateway(t *testing.T) {
 				},
 			},
 			visibility:  "internet-facing",
+			selector:    nil,
 			wantGateway: "",
 			wantNil:     true,
 		},
@@ -91,6 +96,7 @@ func TestPool_SelectGateway(t *testing.T) {
 			name:             "no gateways exist",
 			existingGateways: []gwapiv1.Gateway{},
 			visibility:       "internet-facing",
+			selector:         nil,
 			wantGateway:      "",
 			wantNil:          true,
 		},
@@ -125,8 +131,79 @@ func TestPool_SelectGateway(t *testing.T) {
 				},
 			},
 			visibility:  "internet-facing",
+			selector:    nil,
 			wantGateway: "gw-02",
 			wantNil:     false,
+		},
+		{
+			name: "select gateway matching label selector",
+			existingGateways: []gwapiv1.Gateway{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "gw-01",
+						Namespace: "edge",
+						Labels: map[string]string{
+							"tier": "free",
+						},
+						Annotations: map[string]string{
+							"gateway.opendi.com/visibility":        "internet-facing",
+							"gateway.opendi.com/certificate-count": "5",
+						},
+					},
+					Spec: gwapiv1.GatewaySpec{
+						GatewayClassName: "aws-alb",
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "gw-02",
+						Namespace: "edge",
+						Labels: map[string]string{
+							"tier": "premium",
+						},
+						Annotations: map[string]string{
+							"gateway.opendi.com/visibility":        "internet-facing",
+							"gateway.opendi.com/certificate-count": "5",
+						},
+					},
+					Spec: gwapiv1.GatewaySpec{
+						GatewayClassName: "aws-alb",
+					},
+				},
+			},
+			visibility: "internet-facing",
+			selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"tier": "premium"},
+			},
+			wantGateway: "gw-02",
+			wantNil:     false,
+		},
+		{
+			name: "no gateway matching label selector",
+			existingGateways: []gwapiv1.Gateway{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "gw-01",
+						Namespace: "edge",
+						Labels: map[string]string{
+							"tier": "free",
+						},
+						Annotations: map[string]string{
+							"gateway.opendi.com/visibility":        "internet-facing",
+							"gateway.opendi.com/certificate-count": "5",
+						},
+					},
+					Spec: gwapiv1.GatewaySpec{
+						GatewayClassName: "aws-alb",
+					},
+				},
+			},
+			visibility: "internet-facing",
+			selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"tier": "premium"},
+			},
+			wantGateway: "",
+			wantNil:     true,
 		},
 	}
 
@@ -145,9 +222,12 @@ func TestPool_SelectGateway(t *testing.T) {
 			pool := NewPool(client, "edge", "aws-alb")
 			ctx := context.Background()
 
-			got, err := pool.SelectGateway(ctx, tt.visibility)
-			if err != nil {
-				t.Fatalf("SelectGateway() error = %v", err)
+			got, err := pool.SelectGateway(ctx, tt.visibility, tt.selector)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("SelectGateway() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
 			}
 
 			if tt.wantNil {

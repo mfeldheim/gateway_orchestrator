@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -27,6 +28,9 @@ const (
 	AnnotationCertificateCount = "gateway.opendi.com/certificate-count"
 	AnnotationRuleCount        = "gateway.opendi.com/rule-count"
 	AnnotationVisibility       = "gateway.opendi.com/visibility"
+
+	// LabelGatewayAccess is applied to namespaces that are allowed to create HTTPRoutes for a Gateway
+	LabelGatewayAccess = "gateway.opendi.com/access"
 )
 
 // ensureGatewayAssignment assigns the request to a Gateway and attaches the certificate
@@ -54,13 +58,16 @@ func (r *GatewayHostnameRequestReconciler) ensureGatewayAssignment(ctx context.C
 		visibility = "internet-facing"
 	}
 
-	gwInfo, err := r.GatewayPool.SelectGateway(ctx, visibility)
+	gwInfo, err := r.GatewayPool.SelectGateway(ctx, visibility, ghr.Spec.GatewaySelector)
 	if err != nil {
 		return fmt.Errorf("failed to select gateway: %w", err)
 	}
 
-	// If no Gateway found with capacity, create a new one
+	// If no Gateway found with capacity, create a new one (unless a selector is specified)
 	if gwInfo == nil {
+		if ghr.Spec.GatewaySelector != nil {
+			return fmt.Errorf("no Gateway matching selector with available capacity")
+		}
 		logger.Info("No Gateway with capacity found, creating new Gateway")
 		index, err := r.GatewayPool.GetNextGatewayIndex(ctx)
 		if err != nil {
@@ -249,13 +256,13 @@ func (r *GatewayHostnameRequestReconciler) ensureAllowedRoutes(ctx context.Conte
 				},
 			}
 
-			// Allow from specific namespaces
+			// Allow from namespaces with the gateway access label
 			fromNamespaces := gwapiv1.NamespacesFromSelector
 			listener.AllowedRoutes.Namespaces = &gwapiv1.RouteNamespaces{
 				From: &fromNamespaces,
 				Selector: &metav1.LabelSelector{
 					MatchLabels: map[string]string{
-						"kubernetes.io/metadata.name": ghr.Namespace,
+						LabelGatewayAccess: gw.Name,
 					},
 				},
 			}
@@ -347,4 +354,63 @@ func (r *GatewayHostnameRequestReconciler) ensureRoute53Alias(ctx context.Contex
 
 func stringPtr(s string) *string {
 	return &s
+}
+
+// ensureNamespaceLabel labels the requesting namespace to allow HTTPRoute creation for the assigned Gateway
+func (r *GatewayHostnameRequestReconciler) ensureNamespaceLabel(ctx context.Context, ghr *gatewayv1alpha1.GatewayHostnameRequest) error {
+	logger := log.FromContext(ctx)
+
+	// Get the namespace
+	var ns corev1.Namespace
+	if err := r.Get(ctx, types.NamespacedName{Name: ghr.Namespace}, &ns); err != nil {
+		return fmt.Errorf("failed to get namespace %s: %w", ghr.Namespace, err)
+	}
+
+	// Check if label already exists
+	if ns.Labels == nil {
+		ns.Labels = make(map[string]string)
+	}
+
+	gatewayName := ghr.Status.AssignedGateway
+	if gatewayName == "" {
+		return fmt.Errorf("no gateway assigned yet")
+	}
+
+	// Add or update the label
+	if ns.Labels[LabelGatewayAccess] != gatewayName {
+		ns.Labels[LabelGatewayAccess] = gatewayName
+		if err := r.Update(ctx, &ns); err != nil {
+			return fmt.Errorf("failed to update namespace label: %w", err)
+		}
+		logger.Info("Added gateway access label to namespace", "namespace", ghr.Namespace, "gateway", gatewayName)
+	}
+
+	return nil
+}
+
+// removeNamespaceLabel removes the gateway access label from the namespace
+func (r *GatewayHostnameRequestReconciler) removeNamespaceLabel(ctx context.Context, ghr *gatewayv1alpha1.GatewayHostnameRequest) error {
+	logger := log.FromContext(ctx)
+
+	// Get the namespace
+	var ns corev1.Namespace
+	if err := r.Get(ctx, types.NamespacedName{Name: ghr.Namespace}, &ns); err != nil {
+		// Namespace might be deleted already
+		return nil
+	}
+
+	if ns.Labels == nil {
+		return nil
+	}
+
+	// Remove the label if it exists
+	if _, exists := ns.Labels[LabelGatewayAccess]; exists {
+		delete(ns.Labels, LabelGatewayAccess)
+		if err := r.Update(ctx, &ns); err != nil {
+			return fmt.Errorf("failed to remove namespace label: %w", err)
+		}
+		logger.Info("Removed gateway access label from namespace", "namespace", ghr.Namespace)
+	}
+
+	return nil
 }

@@ -30,6 +30,12 @@ type GatewayHostnameRequestSpec struct {
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default=aws-alb
 	GatewayClass string `json:"gatewayClass,omitempty"`
+
+	// GatewaySelector optionally restricts which Gateways this request can be assigned to.
+	// If specified, only Gateways matching this selector will be considered.
+	// If not specified, any Gateway with capacity and matching visibility will be used.
+	// +kubebuilder:validation:Optional
+	GatewaySelector *metav1.LabelSelector `json:"gatewaySelector,omitempty"`
 }
 
 // GatewayHostnameRequestStatus defines the observed state of GatewayHostnameRequest

@@ -21,9 +21,10 @@ type ACMClient interface {
 
 // CertificateDetails represents ACM certificate information
 type CertificateDetails struct {
-	Arn    string
-	Domain string
-	Status string // PENDING_VALIDATION, ISSUED, FAILED, etc.
+	Arn     string
+	Domain  string
+	Status  string   // PENDING_VALIDATION, ISSUED, FAILED, etc.
+	InUseBy []string // ARNs of resources using this certificate (e.g., ALB listeners)
 }
 
 // ValidationRecord represents a DNS validation record for ACM

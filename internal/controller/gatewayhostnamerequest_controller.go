@@ -35,6 +35,7 @@ const (
 	ConditionTypeListenerAttached     = "ListenerAttached"
 	ConditionTypeDnsAliasReady        = "DnsAliasReady"
 	ConditionTypeReady                = "Ready"
+	ConditionTypeDeleting             = "Deleting"
 )
 
 // GatewayHostnameRequestReconciler reconciles a GatewayHostnameRequest object
@@ -53,6 +54,7 @@ type GatewayHostnameRequestReconciler struct {
 //+kubebuilder:rbac:groups=gateway.opendi.com,resources=gatewayhostnamerequests/finalizers,verbs=update
 //+kubebuilder:rbac:groups=gateway.opendi.com,resources=domainclaims,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch;create;update;patch
+//+kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;update;patch
 
 // Reconcile implements the reconciliation loop
 func (r *GatewayHostnameRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -233,7 +235,11 @@ func (r *GatewayHostnameRequestReconciler) reconcileNormal(ctx context.Context, 
 		}
 	}
 
-	// Step 8: Configure allowedRoutes
+	// Step 8: Label namespace for gateway access and configure allowedRoutes
+	if err := r.ensureNamespaceLabel(ctx, ghr); err != nil {
+		logger.Info("Failed to label namespace for gateway access", "error", err.Error())
+		// Don't fail reconciliation for this, just log it
+	}
 	if err := r.ensureAllowedRoutes(ctx, ghr); err != nil {
 		logger.Info("Failed to configure allowedRoutes, continuing anyway", "error", err.Error())
 		// Don't fail reconciliation for this, just log it
@@ -261,9 +267,14 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 		return ctrl.Result{}, nil
 	}
 
-	// Cleanup steps (best-effort, log errors but continue)
+	// Set deleting condition
+	r.setCondition(ghr, ConditionTypeDeleting, metav1.ConditionTrue, "DeletionInProgress", "Cleanup in progress")
+	if err := r.Status().Update(ctx, ghr); err != nil {
+		logger.Error(err, "Failed to update deleting condition")
+		// Continue anyway
+	}
 
-	// 1. Remove Route53 alias record
+	// Step 1: Remove Route53 alias record (independent of cert, can happen anytime)
 	if ghr.Status.AssignedLoadBalancer != "" {
 		aliasRecord := aws.DNSRecord{
 			Name: ghr.Spec.Hostname,
@@ -281,7 +292,7 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 		}
 	}
 
-	// 2. Remove certificate ARN from Gateway annotation
+	// Step 2: Remove certificate ARN from Gateway annotation (triggers AWS LBC to update ALB)
 	if ghr.Status.AssignedGateway != "" && ghr.Status.CertificateArn != "" {
 		if err := r.removeCertificateFromGateway(ctx, ghr); err != nil {
 			logger.Error(err, "Failed to remove certificate from gateway", "gateway", ghr.Status.AssignedGateway)
@@ -290,7 +301,12 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 		}
 	}
 
-	// 3. Delete DNS validation records
+	// Step 2.5: Remove namespace label for gateway access
+	if err := r.removeNamespaceLabel(ctx, ghr); err != nil {
+		logger.Error(err, "Failed to remove namespace label", "namespace", ghr.Namespace)
+	}
+
+	// Step 3: Delete DNS validation records
 	if ghr.Status.CertificateArn != "" {
 		validationRecords, err := r.ACMClient.GetValidationRecords(ctx, ghr.Status.CertificateArn)
 		if err == nil {
@@ -309,8 +325,24 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 		}
 	}
 
-	// 4. Delete ACM certificate
+	// Step 4: Check if certificate is still in use by ALB before deletion
 	if ghr.Status.CertificateArn != "" {
+		inUse, err := r.isCertificateInUse(ctx, ghr.Status.CertificateArn)
+		if err != nil {
+			logger.Error(err, "Failed to check certificate usage, continuing anyway")
+			// Continue with deletion attempt - best effort
+		} else if inUse {
+			logger.Info("Certificate still in use by ALB, requeuing deletion",
+				"arn", ghr.Status.CertificateArn)
+			r.setCondition(ghr, ConditionTypeDeleting, metav1.ConditionTrue, "WaitingForCertDetachment",
+				"Waiting for ALB to detach certificate")
+			if err := r.Status().Update(ctx, ghr); err != nil {
+				logger.Error(err, "Failed to update status")
+			}
+			return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+		}
+
+		// Step 5: Delete ACM certificate (only after confirmed not in use)
 		if err := r.ACMClient.DeleteCertificate(ctx, ghr.Status.CertificateArn); err != nil {
 			logger.Error(err, "Failed to delete ACM certificate", "arn", ghr.Status.CertificateArn)
 		} else {
@@ -318,12 +350,12 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 		}
 	}
 
-	// 5. Release DomainClaim
+	// Step 6: Release DomainClaim
 	if err := r.deleteDomainClaim(ctx, ghr); err != nil {
 		logger.Error(err, "Failed to delete domain claim")
 	}
 
-	// Remove finalizer
+	// Step 7: Remove finalizer
 	controllerutil.RemoveFinalizer(ghr, FinalizerName)
 	if err := r.Update(ctx, ghr); err != nil {
 		return ctrl.Result{}, err
@@ -331,6 +363,15 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 
 	logger.Info("Successfully deleted GatewayHostnameRequest", "hostname", ghr.Spec.Hostname)
 	return ctrl.Result{}, nil
+}
+
+// isCertificateInUse checks if the ACM certificate is still referenced by any resource (e.g., ALB listener)
+func (r *GatewayHostnameRequestReconciler) isCertificateInUse(ctx context.Context, certArn string) (bool, error) {
+	details, err := r.ACMClient.DescribeCertificate(ctx, certArn)
+	if err != nil {
+		return false, err
+	}
+	return len(details.InUseBy) > 0, nil
 }
 
 // getALBHostedZoneId extracts the ALB hosted zone ID from the load balancer DNS name
@@ -414,7 +455,12 @@ func (r *GatewayHostnameRequestReconciler) cleanupForReprovisioning(ctx context.
 		}
 	}
 
-	// Step 3: Delete DNS validation records
+	// Step 3: Remove namespace label for gateway access
+	if err := r.removeNamespaceLabel(ctx, ghr); err != nil {
+		logger.Error(err, "Failed to remove namespace label during reprovisioning", "namespace", ghr.Namespace)
+	}
+
+	// Step 4: Delete DNS validation records
 	if ghr.Status.CertificateArn != "" {
 		validationRecords, err := r.ACMClient.GetValidationRecords(ctx, ghr.Status.CertificateArn)
 		if err == nil {
@@ -433,7 +479,7 @@ func (r *GatewayHostnameRequestReconciler) cleanupForReprovisioning(ctx context.
 		}
 	}
 
-	// Step 4: Delete ACM certificate (best effort, may fail if still in use)
+	// Step 5: Delete ACM certificate (best effort, may fail if still in use)
 	if ghr.Status.CertificateArn != "" {
 		if err := r.ACMClient.DeleteCertificate(ctx, ghr.Status.CertificateArn); err != nil {
 			logger.Error(err, "Failed to delete ACM certificate during reprovisioning (may still be in use)", "arn", ghr.Status.CertificateArn)
@@ -442,7 +488,7 @@ func (r *GatewayHostnameRequestReconciler) cleanupForReprovisioning(ctx context.
 		}
 	}
 
-	// Step 5: Release DomainClaim
+	// Step 6: Release DomainClaim
 	if err := r.deleteDomainClaim(ctx, ghr); err != nil {
 		logger.Error(err, "Failed to delete domain claim during reprovisioning")
 	} else {
