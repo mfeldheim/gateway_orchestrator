@@ -9,12 +9,14 @@ import (
 type MockACMClient struct {
 	Certificates      map[string]*CertificateDetails
 	ValidationRecords map[string][]ValidationRecord
+	InUseBy           map[string][]string // certArn -> list of resource ARNs using it
 }
 
 func NewMockACMClient() *MockACMClient {
 	return &MockACMClient{
 		Certificates:      make(map[string]*CertificateDetails),
 		ValidationRecords: make(map[string][]ValidationRecord),
+		InUseBy:           make(map[string][]string),
 	}
 }
 
@@ -40,7 +42,19 @@ func (m *MockACMClient) DescribeCertificate(ctx context.Context, certArn string)
 	if !ok {
 		return nil, fmt.Errorf("certificate not found: %s", certArn)
 	}
+	// Populate InUseBy from the mock's tracking map
+	cert.InUseBy = m.InUseBy[certArn]
 	return cert, nil
+}
+
+// SetCertificateInUse sets the resources that are using a certificate (for testing)
+func (m *MockACMClient) SetCertificateInUse(certArn string, resources []string) {
+	m.InUseBy[certArn] = resources
+}
+
+// ClearCertificateInUse removes all in-use references for a certificate (for testing)
+func (m *MockACMClient) ClearCertificateInUse(certArn string) {
+	delete(m.InUseBy, certArn)
 }
 
 func (m *MockACMClient) DeleteCertificate(ctx context.Context, certArn string) error {

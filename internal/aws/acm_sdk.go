@@ -55,10 +55,17 @@ func (c *SDKACMClient) DescribeCertificate(ctx context.Context, arn string) (*Ce
 		return nil, fmt.Errorf("failed to describe certificate: %w", err)
 	}
 
+	// Extract InUseBy ARNs (resources like ALB listeners that use this cert)
+	inUseBy := make([]string, len(result.Certificate.InUseBy))
+	for i, arn := range result.Certificate.InUseBy {
+		inUseBy[i] = arn
+	}
+
 	return &CertificateDetails{
-		Arn:    arn,
-		Domain: aws.ToString(result.Certificate.DomainName),
-		Status: string(result.Certificate.Status),
+		Arn:     arn,
+		Domain:  aws.ToString(result.Certificate.DomainName),
+		Status:  string(result.Certificate.Status),
+		InUseBy: inUseBy,
 	}, nil
 }
 
