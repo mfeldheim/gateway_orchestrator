@@ -2,12 +2,16 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -88,6 +92,38 @@ func (r *GatewayHostnameRequestReconciler) Reconcile(ctx context.Context, req ct
 // reconcileNormal handles the normal reconciliation flow
 func (r *GatewayHostnameRequestReconciler) reconcileNormal(ctx context.Context, ghr *gatewayv1alpha1.GatewayHostnameRequest) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+
+	// Detect spec drift - if spec changed, cleanup and re-provision
+	currentHash := computeSpecHash(&ghr.Spec)
+	if ghr.Status.ObservedSpecHash != "" && ghr.Status.ObservedSpecHash != currentHash {
+		logger.Info("Spec changed, triggering re-provisioning",
+			"oldHash", ghr.Status.ObservedSpecHash,
+			"newHash", currentHash,
+			"hostname", ghr.Spec.Hostname)
+		r.Recorder.Event(ghr, corev1.EventTypeNormal, "SpecChanged", "Spec changed, cleaning up for re-provisioning")
+
+		// Clean up old resources
+		if err := r.cleanupForReprovisioning(ctx, ghr); err != nil {
+			logger.Error(err, "Failed to cleanup during reprovisioning")
+			// Continue anyway - best effort cleanup
+		}
+
+		// Clear status fields to trigger full re-reconciliation
+		ghr.Status.CertificateArn = ""
+		ghr.Status.AssignedGateway = ""
+		ghr.Status.AssignedGatewayNamespace = ""
+		ghr.Status.AssignedLoadBalancer = ""
+		ghr.Status.Conditions = nil
+		ghr.Status.ObservedSpecHash = ""
+		ghr.Status.ObservedGeneration = 0
+
+		if err := r.Status().Update(ctx, ghr); err != nil {
+			return ctrl.Result{}, err
+		}
+
+		// Requeue to start fresh reconciliation
+		return ctrl.Result{Requeue: true}, nil
+	}
 
 	// Step 1: Validate request
 	if err := r.validateRequest(ghr); err != nil {
@@ -203,7 +239,9 @@ func (r *GatewayHostnameRequestReconciler) reconcileNormal(ctx context.Context, 
 		// Don't fail reconciliation for this, just log it
 	}
 
-	// Step 9: Mark as Ready
+	// Step 9: Mark as Ready and update observed generation/hash
+	ghr.Status.ObservedGeneration = ghr.Generation
+	ghr.Status.ObservedSpecHash = computeSpecHash(&ghr.Spec)
 	r.setCondition(ghr, ConditionTypeReady, metav1.ConditionTrue, "Ready", "Hostname request fully provisioned")
 	r.Recorder.Event(ghr, corev1.EventTypeNormal, "Ready", "Hostname fully provisioned")
 	if err := r.Status().Update(ctx, ghr); err != nil {
@@ -333,4 +371,83 @@ func (r *GatewayHostnameRequestReconciler) SetupWithManager(mgr ctrl.Manager) er
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&gatewayv1alpha1.GatewayHostnameRequest{}).
 		Complete(r)
+}
+
+// computeSpecHash computes a hash of the spec fields that require re-provisioning when changed
+func computeSpecHash(spec *gatewayv1alpha1.GatewayHostnameRequestSpec) string {
+	// Hash hostname + zoneId + visibility + gatewayClass
+	data := fmt.Sprintf("%s|%s|%s|%s", spec.Hostname, spec.ZoneId, spec.Visibility, spec.GatewayClass)
+	hash := sha256.Sum256([]byte(data))
+	return hex.EncodeToString(hash[:8]) // First 8 bytes is enough
+}
+
+// cleanupForReprovisioning removes resources created by the previous spec without removing the finalizer
+// This is called when spec drift is detected to clean up before re-provisioning with new settings
+func (r *GatewayHostnameRequestReconciler) cleanupForReprovisioning(ctx context.Context, ghr *gatewayv1alpha1.GatewayHostnameRequest) error {
+	logger := log.FromContext(ctx)
+	logger.Info("Cleaning up resources for reprovisioning", "hostname", ghr.Spec.Hostname)
+
+	// Step 1: Remove Route53 alias record
+	if ghr.Status.AssignedLoadBalancer != "" {
+		aliasRecord := aws.DNSRecord{
+			Name: ghr.Spec.Hostname,
+			Type: "A",
+			AliasTarget: &aws.AliasTarget{
+				DNSName:              ghr.Status.AssignedLoadBalancer,
+				HostedZoneID:         r.getALBHostedZoneId(ghr.Status.AssignedLoadBalancer),
+				EvaluateTargetHealth: true,
+			},
+		}
+		if err := r.Route53Client.DeleteRecord(ctx, ghr.Spec.ZoneId, aliasRecord); err != nil {
+			logger.Error(err, "Failed to delete Route53 alias record during reprovisioning", "hostname", ghr.Spec.Hostname)
+		} else {
+			logger.Info("Deleted Route53 alias record during reprovisioning", "hostname", ghr.Spec.Hostname)
+		}
+	}
+
+	// Step 2: Remove certificate ARN from Gateway annotation
+	if ghr.Status.AssignedGateway != "" && ghr.Status.CertificateArn != "" {
+		if err := r.removeCertificateFromGateway(ctx, ghr); err != nil {
+			logger.Error(err, "Failed to remove certificate from gateway during reprovisioning")
+		} else {
+			logger.Info("Removed certificate from gateway during reprovisioning", "gateway", ghr.Status.AssignedGateway)
+		}
+	}
+
+	// Step 3: Delete DNS validation records
+	if ghr.Status.CertificateArn != "" {
+		validationRecords, err := r.ACMClient.GetValidationRecords(ctx, ghr.Status.CertificateArn)
+		if err == nil {
+			for _, vr := range validationRecords {
+				record := aws.DNSRecord{
+					Name:  vr.Name,
+					Type:  vr.Type,
+					Value: vr.Value,
+					TTL:   300,
+				}
+				if err := r.Route53Client.DeleteRecord(ctx, ghr.Spec.ZoneId, record); err != nil {
+					logger.Error(err, "Failed to delete validation record during reprovisioning", "name", vr.Name)
+				}
+			}
+			logger.Info("Deleted DNS validation records during reprovisioning")
+		}
+	}
+
+	// Step 4: Delete ACM certificate (best effort, may fail if still in use)
+	if ghr.Status.CertificateArn != "" {
+		if err := r.ACMClient.DeleteCertificate(ctx, ghr.Status.CertificateArn); err != nil {
+			logger.Error(err, "Failed to delete ACM certificate during reprovisioning (may still be in use)", "arn", ghr.Status.CertificateArn)
+		} else {
+			logger.Info("Deleted ACM certificate during reprovisioning", "arn", ghr.Status.CertificateArn)
+		}
+	}
+
+	// Step 5: Release DomainClaim
+	if err := r.deleteDomainClaim(ctx, ghr); err != nil {
+		logger.Error(err, "Failed to delete domain claim during reprovisioning")
+	} else {
+		logger.Info("Released domain claim during reprovisioning")
+	}
+
+	return nil
 }

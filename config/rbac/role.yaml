@@ -1,0 +1,44 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - gateway.networking.k8s.io
+  resources:
+  - gateways
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - gateway.opendi.com
+  resources:
+  - domainclaims
+  - gatewayhostnamerequests
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - gateway.opendi.com
+  resources:
+  - gatewayhostnamerequests/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - gateway.opendi.com
+  resources:
+  - gatewayhostnamerequests/status
+  verbs:
+  - get
+  - patch
+  - update
