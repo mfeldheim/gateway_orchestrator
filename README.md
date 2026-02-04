@@ -16,14 +16,15 @@ All of this happens automatically—no tickets, no manual approvals, no waiting.
 
 ## What problem does it solve?
 
-In multi-tenant Kubernetes clusters, exposing services externally is painful:
+In multi-tenant Kubernetes clusters, exposing services externally requires managing infrastructure-level resources (Gateways, load balancers, certificates) that application deployers shouldn't have permissions to modify:
 
-- **Manual certificate management** — someone has to request, validate, and attach certs
-- **Shared load balancer bottlenecks** — one ALB for everyone hits AWS limits fast
-- **No self-service** — teams wait for platform engineers to configure DNS and routing
-- **Security gaps** — nothing stops Team A from claiming Team B's hostname in their routes
+- **Separation of concerns** — Application deployment tools (ArgoCD, Flux) shouldn't need write access to Gateway resources, which are infrastructure-level concerns
+- **Self-service without over-privileging** — Teams need to expose services without being granted broad infrastructure permissions
+- **Manual certificate management** — Without automation, someone has to request, validate, and attach certs for every hostname
+- **Shared load balancer bottlenecks** — One ALB for everyone hits AWS limits fast (certificates, rules, target groups)
+- **Security gaps** — Nothing prevents Team A from claiming Team B's hostname in their routes
 
-Gateway Orchestrator solves this with a single CRD. Teams declare what they need, the controller provisions everything safely, and policy enforcement prevents hostname conflicts.
+Gateway Orchestrator solves this by letting teams **request** what they need via a simple CRD, while the controller handles all infrastructure provisioning automatically. Application deployers only manage HTTPRoutes—no Gateway permissions required.
 
 ## Prerequisites
 
@@ -83,14 +84,6 @@ The controller needs these AWS permissions (attach via IRSA):
         "route53:ListResourceRecordSets"
       ],
       "Resource": "arn:aws:route53:::hostedzone/*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "elasticloadbalancing:DescribeListeners",
-        "elasticloadbalancing:ModifyListener"
-      ],
-      "Resource": "*"
     }
   ]
 }
