@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway-orchestrator-controller
+  namespace: gateway-orchestrator-system
+  labels:
+    app.kubernetes.io/name: gateway-orchestrator
+    app.kubernetes.io/component: manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gateway-orchestrator
+      app.kubernetes.io/component: manager
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gateway-orchestrator
+        app.kubernetes.io/component: manager
+    spec:
+      serviceAccountName: gateway-orchestrator-controller
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: manager
+          image: gateway-orchestrator:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --leader-elect
+            - --gateway-namespace=edge
+            - --gateway-class=aws-alb
+            - --metrics-bind-address=:8080
+            - --health-probe-bind-address=:8081
+          ports:
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          env:
+            - name: AWS_REGION
+              value: eu-central-1
+      terminationGracePeriodSeconds: 10

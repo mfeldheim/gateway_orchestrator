@@ -1,7 +1,7 @@
 # K8s Gateway Orchestrator Makefile
 
 # Image URL to use all building/pushing image targets
-IMG ?= gateway-orchestrator:latest
+IMG ?= ghcr.io/mfeldheim/gateway-orchestrator:latest
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -63,6 +63,9 @@ docker-build: ## Build docker image with the controller.
 docker-push: ## Push docker image with the controller.
 	docker push ${IMG}
 
+.PHONY: docker-build-push
+docker-build-push: docker-build docker-push ## Build and push docker image.
+
 ##@ Deployment
 
 .PHONY: install
@@ -75,11 +78,23 @@ uninstall: manifests ## Uninstall CRDs from the K8s cluster specified in ~/.kube
 
 .PHONY: deploy
 deploy: manifests ## Deploy controller to the K8s cluster specified in ~/.kube/config.
-	cd config/manager && kubectl apply -k .
+	kubectl kustomize config/default | kubectl apply -f -
 
 .PHONY: undeploy
 undeploy: ## Undeploy controller from the K8s cluster specified in ~/.kube/config.
-	cd config/manager && kubectl delete -k .
+	kubectl kustomize config/default | kubectl delete --ignore-not-found -f -
+
+.PHONY: deploy-production
+deploy-production: manifests ## Deploy controller with production overlay.
+	kubectl kustomize config/overlays/production | kubectl apply -f -
+
+.PHONY: render
+render: ## Render all Kubernetes manifests (for debugging/ArgoCD).
+	kubectl kustomize config/default
+
+.PHONY: render-production
+render-production: ## Render production manifests (for debugging/ArgoCD).
+	kubectl kustomize config/overlays/production
 
 ##@ Build Dependencies
 
