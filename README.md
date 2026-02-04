@@ -1,372 +1,252 @@
+# Gateway Orchestrator
 
+Self-service domain management for Kubernetes. Teams request domains, the orchestrator handles the rest.
 
-# K8s Gateway Orchestrator
+## What is it?
 
-A Kubernetes controller (written in Go) that enables **self-service, project-owned domains** on AWS while keeping the platform safe and operationally boring.
+Gateway Orchestrator is a Kubernetes controller that automates domain exposure on AWS EKS. When a team creates a `GatewayHostnameRequest`, the controller:
 
-The controller reconciles a custom resource (e.g. `GatewayHostnameRequest`) and provisions/maintains the AWS + Kubernetes resources required to expose workloads via the **Kubernetes Gateway API** on **Amazon EKS** using the **AWS Load Balancer Controller (ALB)**.
+1. Provisions an ACM certificate
+2. Validates it via Route53 DNS
+3. Assigns the hostname to an ALB-backed Gateway
+4. Creates DNS alias records pointing to the load balancer
+5. Grants the namespace permission to create routes for that hostname
 
-> Design goals: **no manual approvals**, **no snowflakes**, **idempotent reconciliation (IS vs SHOULD)**, and **Kubernetes-native best practices**.
+All of this happens automatically—no tickets, no manual approvals, no waiting.
 
----
+## What problem does it solve?
 
-## Problem Statement
+In multi-tenant Kubernetes clusters, exposing services externally is painful:
 
-We run a multi-tenant EKS cluster with many projects. Projects must be able to:
+- **Manual certificate management** — someone has to request, validate, and attach certs
+- **Shared load balancer bottlenecks** — one ALB for everyone hits AWS limits fast
+- **No self-service** — teams wait for platform engineers to configure DNS and routing
+- **Security gaps** — nothing stops Team A from claiming Team B's hostname in their routes
 
-- Own **full domains** (apex and subdomains) in Route53 (some projects have multiple domains).
-- Request and validate TLS certificates via ACM.
-- Attach those certificates to an ALB-backed Gateway.
-- Create `HTTPRoute` resources in their namespace to route traffic to their Services.
+Gateway Orchestrator solves this with a single CRD. Teams declare what they need, the controller provisions everything safely, and policy enforcement prevents hostname conflicts.
 
-The platform must:
+## Prerequisites
 
-- Avoid a single shared ALB becoming a scaling/limit bottleneck.
-- Enforce safety boundaries (prevent hostile/accidental domain hijacking).
-- Recover from controller restarts/state loss by reconciling **actual state** to **desired state**.
-- Keep “global” infrastructure changes controlled (manual apply), while project-level configuration is GitOps/CI-driven.
+- Kubernetes 1.28+ with Gateway API CRDs installed
+- [AWS Load Balancer Controller](https://kubernetes-sigs.github.io/aws-load-balancer-controller/) v2.6+
+- Route53 hosted zone(s) for your domains
+- IRSA-enabled service account with permissions for ACM, Route53, and ELBv2
 
----
+## Installation
 
-## High-Level Approach
+### Using Kustomize
 
-### Kubernetes is the source of truth
+```bash
+# Install CRDs
+kubectl apply -k https://github.com/opendi/gateway_orchestrator/config/crd
 
-- **Desired state** is expressed via CRDs (`GatewayHostnameRequest`, and optionally `DomainClaim`/`HostnameGrant`).
-- The controller records the state of external resources via `status` fields + conditions.
-- Reconciliation is **idempotent** and can always be re-run.
-
-### Edge is an elastic pool
-
-Instead of forcing everything into 1–2 shared ALBs, the controller manages a **pool of Gateways**, each backed by its own ALB. Domains are assigned to a Gateway until it approaches AWS limits (cert count, rules, target groups, etc.), then a new Gateway is created.
-
-### No wheel reinvention
-
-We intentionally reuse:
-
-- **Gateway API** for routing primitives (`GatewayClass`, `Gateway`, `HTTPRoute`).
-- **AWS Load Balancer Controller** to create/manage ALBs.
-- **ACM** for certificate lifecycle.
-- **Route53** for DNS and ACM DNS validation.
-- **Policy-as-code** (Kyverno or Gatekeeper) to enforce hostname ownership on Routes.
-
----
-
-## Non-Goals
-
-- Replacing AWS Load Balancer Controller.
-- Acting as a full DNS registrar / domain acquisition system.
-- Deep L7 traffic policy (rate limiting, auth, etc.). Use WAF / service mesh / API gateway if required.
-- Perfect “smart rebalancing” of domains between ALBs. We prefer **stability** and minimal churn.
-
----
-
-## Architecture
-
-### Components
-
-1. **K8s Gateway Orchestrator Controller** (this project)
-   - Watches `GatewayHostnameRequest` (and optional companion CRDs).
-   - Provisions/updates:
-     - ACM certificates + validation records
-     - Route53 alias records to the assigned ALB
-     - Gateway pool scaling (create additional Gateways when needed)
-     - Gateway `allowedRoutes` rules to allow the requesting namespace
-
-2. **AWS Load Balancer Controller**
-   - Reconciles Gateways/Routes to ALBs and rules.
-
-3. **Policy Engine (recommended)**
-   - Ensures `HTTPRoute.spec.hostnames` may only include hostnames granted to that namespace.
-
-### Control Plane Objects
-
-- `GatewayClass` (cluster-scoped): references AWS Load Balancer Controller.
-- `Gateway` (edge namespace): created/managed as a pool `gw-01`, `gw-02`, ...
-- `HTTPRoute` (project namespace): owned by project teams.
-
-### Custom Resources
-
-The exact CRD names can be adjusted, but the recommended set is:
-
-- **`GatewayHostnameRequest`** (namespaced): request to expose one hostname/domain.
-- **`DomainClaim`** (optional, cluster-scoped or infra-namespace): atomic lock to implement first-come-first-serve.
-- **`HostnameGrant`** (optional, infra-namespace): record of hostnames a namespace is allowed to use (policy engine consumes this).
-
----
-
-## CRD: GatewayHostnameRequest (concept)
-
-> This is the contract between platform and project teams.
-
-Typical fields:
-
-- `spec.zoneId`: Route53 hosted zone id (must exist)
-- `spec.hostname`: FQDN to expose (e.g. `test.opendi.com`)
-- `spec.environment`: logical env selector (e.g. `dev`, `staging`, `prod`)
-- `spec.visibility`: `internet-facing` vs `internal`
-- `spec.gatewayClass`: which GatewayClass to use
-- `spec.routePolicy`: whether to auto-allow the namespace (via `allowedRoutes`) and any constraints
-- `spec.dns`: desired records (`A/AAAA ALIAS`, optionally `www` redirects, etc.)
-
-Status fields (controller-managed):
-
-- `status.assignedGateway`: name/namespace
-- `status.assignedLoadBalancer`: ALB DNS name / ARN if available
-- `status.certificateArn`: ACM certificate ARN
-- `status.conditions`: `Claimed`, `CertificateRequested`, `DnsValidated`, `CertificateIssued`, `ListenerAttached`, `DnsAliasReady`, `Ready`
-
----
-
-## Reconciliation State Machine
-
-The controller must be stateless and recoverable. Each reconcile should:
-
-1. **Validate request**
-   - Required fields present
-   - Hostname format + allowed domain policy (optional allowlist)
-
-2. **Claim (first-come-first-serve)**
-   - Create/ensure a `DomainClaim` for `(zoneId, hostname)`
-   - If claim exists and not owned by this request -> set condition `Denied` and stop.
-
-3. **Ensure ACM certificate**
-   - Create or reuse a cert for the exact hostname.
-   - Prefer one cert per request (simple ownership). SAN bundling can be a future optimization.
-
-4. **Ensure DNS validation records**
-   - Write required CNAME records for ACM DNS validation into the provided `zoneId`.
-
-5. **Wait for issuance**
-   - Poll/observe ACM until `ISSUED`.
-
-6. **Assign to a Gateway**
-   - Choose a Gateway from the pool that has capacity.
-   - If none fits, create a new Gateway in the pool.
-
-7. **Attach certificate to listener**
-   - Ensure the ALB listener serving this Gateway has the cert attached.
-   - Use controller-supported patterns (AWS LBC currently works with ACM ARNs).
-
-8. **Ensure Route53 alias**
-   - Create/ensure `A/AAAA ALIAS` to the assigned ALB.
-
-9. **Allow Routes for the namespace**
-   - Update Gateway `allowedRoutes` to permit the request’s namespace (or label selector).
-   - Optionally create/update `HostnameGrant` for hostname-level policy enforcement.
-
-10. **Finalize**
-   - Mark `Ready=True`.
-
-### Deletion / Cleanup
-
-With a finalizer on `GatewayHostnameRequest`:
-
-- Remove Route53 alias records
-- Detach cert from listener (optional)
-- Delete ACM certificate (if owned exclusively)
-- Delete validation records (optional)
-- Release `DomainClaim`
-
-> Cleanup must be best-effort and safe to retry.
-
----
-
-## Multi-Tenancy & Safety
-
-### Minimum safety (no tags, no manual approvals)
-
-Even with “assume ownership on request”, implement guardrails:
-
-- **Atomic claims**: deny duplicate `(zoneId, hostname)` requests.
-- **Domain allowlist (recommended)**: limit hostnames to a known list of apex domains we operate (e.g. `opendi.com`, `in-muenchen.de`, ...). This prevents accidental use of unrelated domains.
-- **Route hostname enforcement (strongly recommended)**:
-  - Use Kyverno/Gatekeeper to ensure `HTTPRoute.spec.hostnames` are allowed for the namespace.
-  - Controller creates `HostnameGrant` objects; policy checks every Route.
-
-### Why policy-as-code matters
-
-Without a policy engine, a team could accidentally create a Route claiming another team’s hostname (even if they don’t own the DNS). Policy ensures hostnames are only used by the approved namespace.
-
----
-
-## AWS Limits & Gateway Pool Scaling
-
-ALBs have practical limits that become relevant in shared environments:
-
-- Number of certificates per listener (SNI)
-- Rules per listener
-- Target groups per ALB
-
-The orchestrator should keep Gateways small enough to avoid limit pressure:
-
-- Maintain an internal model of “load” per Gateway (certs/rules/targets).
-- Place new hostnames using a stable algorithm (first-fit or consistent hash).
-- Avoid rebalancing existing domains unless explicitly requested.
-
----
-
-## Repository Layout (recommended)
-
-```
-.
-├── cmd/
-│   └── controller/                 # main entrypoint
-├── api/
-│   └── v1alpha1/                   # CRD Go types
-├── internal/
-│   ├── controller/                 # reconcilers
-│   ├── aws/                        # thin AWS clients (ACM, Route53, ELBv2)
-│   ├── gateway/                    # gateway pool logic
-│   └── policy/                     # hostname grant helpers
-├── config/
-│   ├── crd/                        # generated CRDs
-│   ├── rbac/                       # controller RBAC
-│   ├── manager/                    # kustomize/helm manifests
-│   └── samples/                    # sample CRs
-├── charts/                         # optional helm chart
-└── Makefile
+# Install controller
+kubectl apply -k https://github.com/opendi/gateway_orchestrator/config/default
 ```
 
----
+### Using kubectl
 
-## Technology Choices
+```bash
+# Clone the repo
+git clone https://github.com/opendi/gateway_orchestrator.git
+cd gateway_orchestrator
 
-- **Go** with `controller-runtime` / Kubebuilder scaffolding.
-- AWS SDK for Go v2 for AWS APIs.
-- Workqueue-based reconciliation with backoff.
-- Structured logging, metrics, and events.
+# Install CRDs
+kubectl apply -f config/crd/bases/
 
----
+# Install controller (adjust image and IRSA role as needed)
+kubectl apply -k config/default/
+```
 
-## Development
+### Required AWS IAM Permissions
 
-### Prerequisites
+The controller needs these AWS permissions (attach via IRSA):
 
-- Go (latest stable)
-- kubebuilder tools (controller-gen)
-- access to a dev EKS cluster (or kind for unit/integration where possible)
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "acm:RequestCertificate",
+        "acm:DescribeCertificate",
+        "acm:DeleteCertificate",
+        "acm:ListCertificates"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "route53:ChangeResourceRecordSets",
+        "route53:ListResourceRecordSets"
+      ],
+      "Resource": "arn:aws:route53:::hostedzone/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "elasticloadbalancing:DescribeListeners",
+        "elasticloadbalancing:ModifyListener"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
 
-### Common tasks
+## Usage
 
-- Generate CRDs:
-  - `make generate`
-  - `make manifests`
+### Request a hostname
 
-- Run locally against a cluster:
-  - `make run`
+Create a `GatewayHostnameRequest` in your namespace:
 
-- Unit tests:
-  - `make test`
+```yaml
+apiVersion: gateway.opendi.com/v1alpha1
+kind: GatewayHostnameRequest
+metadata:
+  name: my-api
+  namespace: my-team
+spec:
+  hostname: api.example.com
+  zoneId: Z1234567890ABC  # Your Route53 hosted zone ID
+  environment: prod       # Optional: dev, staging, prod
+  visibility: internet-facing  # Optional: internet-facing or internal
+```
 
-- Lint:
-  - `make lint`
+Apply it:
 
-> Prefer fast unit tests and contract tests for AWS client wrappers; use integration tests sparingly.
+```bash
+kubectl apply -f gatewayhostnamerequest.yaml
+```
 
----
+### Check status
 
-## Deployment
+```bash
+kubectl get gatewayhostnamerequests -n my-team
 
-### Global (platform-owned, manually applied)
+NAME     HOSTNAME          GATEWAY   READY   AGE
+my-api   api.example.com   gw-01     True    5m
+```
 
-Platform repo should install:
+View detailed status:
 
-- AWS Load Balancer Controller
-- GatewayClass
-- Base `Gateway` pool namespace (`edge`)
-- Policy engine (Kyverno or Gatekeeper) and baseline policies
-- This controller (Orchestrator)
+```bash
+kubectl describe ghr my-api -n my-team
+```
 
-### Project-owned (GitOps/CI)
+The controller progresses through these conditions:
+- `Claimed` — hostname reserved (first-come-first-serve)
+- `CertificateRequested` — ACM certificate created
+- `DnsValidated` — validation records created in Route53
+- `CertificateIssued` — ACM certificate is active
+- `ListenerAttached` — certificate attached to Gateway/ALB
+- `DnsAliasReady` — A/AAAA records point to the ALB
+- `Ready` — everything is provisioned
 
-Project repos should apply:
+### Create routes to your service
 
-- `GatewayHostnameRequest`
-- `HTTPRoute` + app manifests
+Once `Ready=True`, create an `HTTPRoute` in your namespace:
 
----
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: my-api-route
+  namespace: my-team
+spec:
+  parentRefs:
+    - name: gw-01           # From GatewayHostnameRequest status
+      namespace: edge
+  hostnames:
+    - api.example.com
+  rules:
+    - backendRefs:
+        - name: my-api-service
+          port: 8080
+```
 
-## IAM & Permissions
+Traffic now flows: `api.example.com` → ALB → your service.
 
-The controller uses IRSA and must have AWS permissions for:
+## CRD Reference
 
-- ACM: request/describe/delete certificates
-- Route53: change record sets in specified hosted zones
-- ELBv2: describe/modify listeners (attach certificates)
-- Read-only discovery permissions for reconciliation
+### GatewayHostnameRequest
 
-**Principles:**
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `spec.hostname` | string | Yes | FQDN to expose (e.g., `api.example.com`) |
+| `spec.zoneId` | string | Yes | Route53 hosted zone ID |
+| `spec.environment` | string | No | `dev`, `staging`, or `prod` |
+| `spec.visibility` | string | No | `internet-facing` (default) or `internal` |
+| `spec.gatewayClass` | string | No | GatewayClass name (default: `aws-alb`) |
+| `spec.gatewaySelector` | LabelSelector | No | Restrict which Gateways can be used |
 
-- Least privilege where possible.
-- Explicitly document required permissions.
-- Prefer deterministic resource names and storing ARNs in `status` for auditability.
+### Supporting CRDs
 
----
+- **DomainClaim** (cluster-scoped): Implements first-come-first-serve hostname reservation. Created automatically by the controller.
+- **HostnameGrant** (edge namespace): Records which namespaces can use which hostnames. Used by policy engines (Kyverno/Gatekeeper) to enforce route ownership.
 
-## Observability
+## How it works
 
-Controller should emit:
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Team Namespace                                                  │
+│  ┌──────────────────────┐    ┌──────────────────────┐           │
+│  │ GatewayHostnameRequest│    │ HTTPRoute             │          │
+│  │ hostname: api.example │───▶│ hostnames: [api.ex...] │         │
+│  └──────────────────────┘    └──────────────────────┘           │
+└─────────────────────────────────────────────────────────────────┘
+                │
+                │ reconciles
+                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Gateway Orchestrator                                            │
+│  • Creates ACM certificate                                       │
+│  • Adds DNS validation records                                   │
+│  • Assigns to Gateway with capacity                              │
+│  • Attaches cert to ALB listener                                 │
+│  • Creates Route53 alias to ALB                                  │
+│  • Creates HostnameGrant for policy enforcement                  │
+└─────────────────────────────────────────────────────────────────┘
+                │
+                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Edge Namespace                                                  │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐                       │
+│  │ Gateway  │  │ Gateway  │  │ Gateway  │  (auto-scaled pool)   │
+│  │ gw-01    │  │ gw-02    │  │ gw-03    │                       │
+│  └──────────┘  └──────────┘  └──────────┘                       │
+│       │                                                          │
+│       ▼                                                          │
+│  ┌──────────────────────────────────────┐                       │
+│  │ AWS Load Balancer Controller          │                       │
+│  │ → creates/manages ALBs                │                       │
+│  └──────────────────────────────────────┘                       │
+└─────────────────────────────────────────────────────────────────┘
+```
 
-- Kubernetes Events on important transitions
-- Prometheus metrics (reconcile duration, error counts, retries)
-- Logs with request identifiers (`namespace/name`, `hostname`, `zoneId`)
+## Security recommendations
 
-Recommended dashboards/alerts:
+1. **Restrict who can create requests** — Use RBAC to limit `GatewayHostnameRequest` creation
+2. **Enforce hostname ownership** — Deploy Kyverno or Gatekeeper policies that validate `HTTPRoute.spec.hostnames` against `HostnameGrant` objects
+3. **Allowlist domains** — Configure the controller to only accept hostnames under your approved apex domains
 
-- High reconcile error rate
-- ACM issuance stuck (pending validation)
-- Route53 change failures
-- ALB listener attach failures
+## Troubleshooting
 
----
+**Request stuck on `CertificateRequested`**
+- Check if DNS validation records were created in Route53
+- Verify the zoneId is correct and the controller has Route53 permissions
 
-## Sample Workflow
+**Request stuck on `CertificateIssued`**
+- The Gateway pool may be full; check if a new Gateway is being created
+- Verify AWS Load Balancer Controller is running and healthy
 
-1. Project creates hosted zone in Route53 (already exists).
-2. Project applies a `GatewayHostnameRequest`:
-   - `hostname: test.opendi.com`
-   - `zoneId: A1231313`
-3. Orchestrator provisions cert + validation + ALB attachment + alias.
-4. Project creates `HTTPRoute` in its namespace pointing to its Service.
-5. Traffic flows.
+**HTTPRoute not working**
+- Confirm `GatewayHostnameRequest` shows `Ready=True`
+- Check that `parentRefs` in your HTTPRoute matches the assigned Gateway
+- Verify your namespace is allowed in the Gateway's `allowedRoutes`
 
----
+## License
 
-## Security Notes
-
-Even if we currently “assume ownership on request”, treat this controller as a high-privilege component.
-
-Minimum required protections:
-
-- Restrict who can create `GatewayHostnameRequest` (RBAC).
-- Consider an allowed apex-domain list.
-- Enforce hostname usage on `HTTPRoute` using policy-as-code.
-
----
-
-## Roadmap (suggested)
-
-- v1alpha1: single-hostname requests, 1 cert per request, simple gateway pool scaling.
-- v1beta1: hostname grants + policy integration, better placement metrics.
-- v1: optional SAN bundling, improved cleanup policies, drift detection hardening.
-
----
-
-## Contributing / Agent Guidance
-
-Code agents working on this repo should:
-
-- Prefer **Kubernetes-native patterns** (controller-runtime, status conditions, finalizers).
-- Keep reconciliation **idempotent** and **safe to retry**.
-- Avoid custom DSLs; keep CRDs small and composable.
-- Avoid storing secrets in Kubernetes; use ACM.
-- Keep AWS interactions behind thin interfaces for testing.
-- Document behavior and failure modes.
-
-If in doubt, choose the solution that is:
-
-1) simpler,
-2) safer,
-3) more observable,
-4) easiest to recover after state loss.
+Apache 2.0
