@@ -13,8 +13,8 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build the binary
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o controller ./cmd/controller
+# Build the binary (supports multi-arch via docker buildx)
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o controller ./cmd/controller
 
 # Runtime stage
 FROM alpine:3.19
