@@ -143,7 +143,8 @@ func (p *Pool) CreateGateway(ctx context.Context, visibility string, index int) 
 			Protocol: gwapiv1.HTTPSProtocolType,
 			Port:     443,
 			TLS: &gwapiv1.ListenerTLSConfig{
-				Mode: ptrTo(gwapiv1.TLSModeTerminate),
+				Mode:            ptrTo(gwapiv1.TLSModeTerminate),
+				CertificateRefs: []gwapiv1.SecretObjectReference{}, // Empty initially, certificates added via annotations
 			},
 		},
 		{
