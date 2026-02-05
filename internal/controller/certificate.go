@@ -27,6 +27,7 @@ func (r *GatewayHostnameRequestReconciler) requestCertificate(ctx context.Contex
 
 // ensureValidationRecords creates DNS validation records in Route53
 func (r *GatewayHostnameRequestReconciler) ensureValidationRecords(ctx context.Context, ghr *gatewayv1alpha1.GatewayHostnameRequest) error {
+	logger := log.FromContext(ctx)
 	if ghr.Status.CertificateArn == "" {
 		return fmt.Errorf("certificate ARN not set")
 	}
@@ -37,6 +38,8 @@ func (r *GatewayHostnameRequestReconciler) ensureValidationRecords(ctx context.C
 		return fmt.Errorf("failed to get validation records: %w", err)
 	}
 
+	logger.Info("Retrieved validation records from ACM", "count", len(validationRecords), "certificateArn", ghr.Status.CertificateArn)
+
 	// Create each validation record in Route53
 	for _, valRec := range validationRecords {
 		record := aws.DNSRecord{
@@ -46,11 +49,15 @@ func (r *GatewayHostnameRequestReconciler) ensureValidationRecords(ctx context.C
 			TTL:   300,
 		}
 
+		logger.Info("Creating validation record in Route53", "name", record.Name, "type", record.Type, "value", record.Value, "zoneId", ghr.Spec.ZoneId)
+
 		if err := r.Route53Client.CreateOrUpdateRecord(ctx, ghr.Spec.ZoneId, record); err != nil {
+			logger.Error(err, "Failed to create validation record", "name", record.Name, "zoneId", ghr.Spec.ZoneId)
 			return fmt.Errorf("failed to create validation record: %w", err)
 		}
 	}
 
+	logger.Info("All validation records created successfully", "count", len(validationRecords))
 	return nil
 }
 
