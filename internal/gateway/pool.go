@@ -120,8 +120,8 @@ func (p *Pool) getGatewayInfo(gw *gwapiv1.Gateway) *GatewayInfo {
 	return info
 }
 
-// CreateGateway creates a new Gateway in the pool
-func (p *Pool) CreateGateway(ctx context.Context, visibility string, index int) (*GatewayInfo, error) {
+// CreateGateway creates a new Gateway in the pool with an initial certificate
+func (p *Pool) CreateGateway(ctx context.Context, visibility string, index int, certificateARN string) (*GatewayInfo, error) {
 	name := fmt.Sprintf("gw-%02d", index)
 
 	gw := &gwapiv1.Gateway{}
@@ -129,9 +129,10 @@ func (p *Pool) CreateGateway(ctx context.Context, visibility string, index int) 
 	gw.Namespace = p.namespace
 	gw.Annotations = map[string]string{
 		"gateway.opendi.com/visibility":        visibility,
-		"gateway.opendi.com/certificate-count": "0",
+		"gateway.opendi.com/certificate-count": "1", // Starting with one certificate
 		"gateway.opendi.com/rule-count":        "0",
-		"alb.ingress.kubernetes.io/scheme":     visibility, // AWS LBC annotation for ALB scheme
+		"alb.ingress.kubernetes.io/scheme":     visibility,        // AWS LBC annotation for ALB scheme
+		"alb.ingress.kubernetes.io/certificate-arn": certificateARN, // Initial certificate
 	}
 	gw.Spec.GatewayClassName = gwapiv1.ObjectName(p.gatewayClass)
 
@@ -143,8 +144,9 @@ func (p *Pool) CreateGateway(ctx context.Context, visibility string, index int) 
 			Protocol: gwapiv1.HTTPSProtocolType,
 			Port:     443,
 			TLS: &gwapiv1.ListenerTLSConfig{
-				Mode:            ptrTo(gwapiv1.TLSModeTerminate),
-				CertificateRefs: []gwapiv1.SecretObjectReference{}, // Empty initially, certificates added via annotations
+				Mode: ptrTo(gwapiv1.TLSModeTerminate),
+				// Certificate attached via alb.ingress.kubernetes.io/certificate-arn annotation
+				// AWS Load Balancer Controller handles the actual attachment to ALB
 			},
 		},
 		{

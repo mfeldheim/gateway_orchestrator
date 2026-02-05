@@ -74,7 +74,8 @@ func (r *GatewayHostnameRequestReconciler) ensureGatewayAssignment(ctx context.C
 			return fmt.Errorf("failed to get next gateway index: %w", err)
 		}
 
-		gwInfo, err = r.GatewayPool.CreateGateway(ctx, visibility, index)
+		// Create Gateway with the certificate already attached
+		gwInfo, err = r.GatewayPool.CreateGateway(ctx, visibility, index, ghr.Status.CertificateArn)
 		if err != nil {
 			return fmt.Errorf("failed to create new gateway: %w", err)
 		}
@@ -85,7 +86,7 @@ func (r *GatewayHostnameRequestReconciler) ensureGatewayAssignment(ctx context.C
 	ghr.Status.AssignedGateway = gwInfo.Name
 	ghr.Status.AssignedGatewayNamespace = gwInfo.Namespace
 
-	// Get the actual Gateway resource to attach certificate
+	// Get the actual Gateway resource to attach certificate (if not a newly created one)
 	var gw gwapiv1.Gateway
 	if err := r.Get(ctx, types.NamespacedName{
 		Name:      gwInfo.Name,
@@ -95,6 +96,8 @@ func (r *GatewayHostnameRequestReconciler) ensureGatewayAssignment(ctx context.C
 	}
 
 	// Attach certificate to the Gateway
+	// For newly created Gateways, certificate is already attached during creation
+	// For existing Gateways, we need to add it to the annotation
 	if err := r.attachCertificateToGateway(ctx, ghr, &gw); err != nil {
 		return fmt.Errorf("failed to attach certificate to gateway: %w", err)
 	}

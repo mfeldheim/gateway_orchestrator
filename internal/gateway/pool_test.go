@@ -355,25 +355,28 @@ func TestPool_CreateGateway(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name       string
-		visibility string
-		index      int
+		name           string
+		visibility     string
+		index          int
+		certificateARN string
 	}{
 		{
-			name:       "create internet-facing gateway",
-			visibility: "internet-facing",
-			index:      1,
+			name:           "create internet-facing gateway",
+			visibility:     "internet-facing",
+			index:          1,
+			certificateARN: "arn:aws:acm:us-east-1:123456789012:certificate/12345678-1234-1234-1234-123456789012",
 		},
 		{
-			name:       "create internal gateway",
-			visibility: "internal",
-			index:      2,
+			name:           "create internal gateway",
+			visibility:     "internal",
+			index:          2,
+			certificateARN: "arn:aws:acm:us-east-1:123456789012:certificate/87654321-4321-4321-4321-210987654321",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			info, err := pool.CreateGateway(ctx, tt.visibility, tt.index)
+			info, err := pool.CreateGateway(ctx, tt.visibility, tt.index, tt.certificateARN)
 			if err != nil {
 				t.Fatalf("CreateGateway() error = %v", err)
 			}
