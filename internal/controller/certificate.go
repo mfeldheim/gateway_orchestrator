@@ -6,6 +6,7 @@ import (
 
 	gatewayv1alpha1 "github.com/michelfeldheim/gateway-orchestrator/api/v1alpha1"
 	"github.com/michelfeldheim/gateway-orchestrator/internal/aws"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // requestCertificate requests a new ACM certificate for the hostname
