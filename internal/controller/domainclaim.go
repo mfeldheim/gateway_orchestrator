@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -93,5 +94,5 @@ func (r *GatewayHostnameRequestReconciler) deleteDomainClaim(ctx context.Context
 func generateClaimName(zoneId, hostname string) string {
 	// Use a simple naming scheme: zone-hostname
 	// In production, might want to hash long names
-	return fmt.Sprintf("%s-%s", zoneId, hostname)
+	return fmt.Sprintf("%s-%s", strings.ToLower(zoneId), strings.ToLower(hostname))
 }

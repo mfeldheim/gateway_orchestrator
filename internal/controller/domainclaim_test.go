@@ -23,13 +23,19 @@ func TestGenerateClaimName(t *testing.T) {
 			name:     "simple hostname",
 			zoneId:   "Z123456",
 			hostname: "test.example.com",
-			want:     "Z123456-test.example.com",
+			want:     "z123456-test.example.com",
 		},
 		{
 			name:     "subdomain",
 			zoneId:   "Z789012",
 			hostname: "api.staging.example.com",
-			want:     "Z789012-api.staging.example.com",
+			want:     "z789012-api.staging.example.com",
+		},
+		{
+			name:     "mixed case inputs are normalized",
+			zoneId:   "Z2NRHX85UVTUDQ",
+			hostname: "TeSt.OpEnDi.CoM",
+			want:     "z2nrhx85uvtudq-test.opendi.com",
 		},
 	}
 
@@ -86,7 +92,7 @@ func TestReconciler_ensureDomainClaim(t *testing.T) {
 			},
 			existingClaim: &gatewayv1alpha1.DomainClaim{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "Z123456-test.example.com",
+					Name: "z123456-test.example.com",
 				},
 				Spec: gatewayv1alpha1.DomainClaimSpec{
 					ZoneId:   "Z123456",
@@ -116,7 +122,7 @@ func TestReconciler_ensureDomainClaim(t *testing.T) {
 			},
 			existingClaim: &gatewayv1alpha1.DomainClaim{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "Z123456-test.example.com",
+					Name: "z123456-test.example.com",
 				},
 				Spec: gatewayv1alpha1.DomainClaimSpec{
 					ZoneId:   "Z123456",
@@ -193,7 +199,7 @@ func TestReconciler_deleteDomainClaim(t *testing.T) {
 
 	claim := &gatewayv1alpha1.DomainClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "Z123456-test.example.com",
+			Name: "z123456-test.example.com",
 		},
 		Spec: gatewayv1alpha1.DomainClaimSpec{
 			ZoneId:   "Z123456",
