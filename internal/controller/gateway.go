@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -15,16 +14,8 @@ import (
 	"github.com/michelfeldheim/gateway-orchestrator/internal/aws"
 )
 
-// AWS Load Balancer Controller annotations for Gateways
+// Annotations we use for tracking
 const (
-	// AnnotationCertificateARN specifies the ARN of ACM certificates for the ALB
-	// Multiple certificates can be comma-separated (first is default, rest are SNI)
-	AnnotationCertificateARN = "alb.ingress.kubernetes.io/certificate-arn"
-
-	// AnnotationScheme specifies internet-facing or internal
-	AnnotationScheme = "alb.ingress.kubernetes.io/scheme"
-
-	// Annotations we use for tracking
 	AnnotationCertificateCount = "gateway.opendi.com/certificate-count"
 	AnnotationRuleCount        = "gateway.opendi.com/rule-count"
 	AnnotationVisibility       = "gateway.opendi.com/visibility"
@@ -74,8 +65,8 @@ func (r *GatewayHostnameRequestReconciler) ensureGatewayAssignment(ctx context.C
 			return fmt.Errorf("failed to get next gateway index: %w", err)
 		}
 
-		// Create Gateway with the certificate already attached
-		gwInfo, err = r.GatewayPool.CreateGateway(ctx, visibility, index, ghr.Status.CertificateArn)
+		// Create Gateway (without certificate - that comes via LoadBalancerConfiguration)
+		gwInfo, err = r.GatewayPool.CreateGateway(ctx, visibility, index)
 		if err != nil {
 			return fmt.Errorf("failed to create new gateway: %w", err)
 		}
@@ -86,138 +77,67 @@ func (r *GatewayHostnameRequestReconciler) ensureGatewayAssignment(ctx context.C
 	ghr.Status.AssignedGateway = gwInfo.Name
 	ghr.Status.AssignedGatewayNamespace = gwInfo.Namespace
 
-	// Get the actual Gateway resource to attach certificate (if not a newly created one)
-	var gw gwapiv1.Gateway
-	if err := r.Get(ctx, types.NamespacedName{
-		Name:      gwInfo.Name,
-		Namespace: gwInfo.Namespace,
-	}, &gw); err != nil {
-		return fmt.Errorf("failed to get gateway %s: %w", gwInfo.Name, err)
-	}
-
-	// Attach certificate to the Gateway
-	// For newly created Gateways, certificate is already attached during creation
-	// For existing Gateways, we need to add it to the annotation
-	if err := r.attachCertificateToGateway(ctx, ghr, &gw); err != nil {
-		return fmt.Errorf("failed to attach certificate to gateway: %w", err)
+	// Attach certificate via LoadBalancerConfiguration
+	if err := r.syncLoadBalancerConfiguration(ctx, gwInfo.Name, gwInfo.Namespace, visibility); err != nil {
+		return fmt.Errorf("failed to sync LoadBalancerConfiguration: %w", err)
 	}
 
 	logger.Info("Successfully assigned to Gateway", "gateway", gwInfo.Name, "hostname", ghr.Spec.Hostname)
 	return nil
 }
 
-// attachCertificateToGateway adds the ACM certificate ARN to the Gateway's annotations
-// AWS Load Balancer Controller reads this annotation and attaches certs to the ALB listener
+// syncLoadBalancerConfiguration collects all certificate ARNs for a Gateway and updates its LoadBalancerConfiguration
+func (r *GatewayHostnameRequestReconciler) syncLoadBalancerConfiguration(ctx context.Context, gatewayName, gatewayNamespace, visibility string) error {
+	// Collect all certificate ARNs from GatewayHostnameRequests assigned to this Gateway
+	arns, err := r.getGatewayCertificateARNs(ctx, gatewayName, gatewayNamespace)
+	if err != nil {
+		return err
+	}
+
+	// Create or update the LoadBalancerConfiguration
+	return r.ensureLoadBalancerConfiguration(ctx, gatewayName, gatewayNamespace, arns, visibility)
+}
+
+// attachCertificateToGateway is now a no-op - certificates are managed via LoadBalancerConfiguration
+// Keeping for backwards compatibility during transition
 func (r *GatewayHostnameRequestReconciler) attachCertificateToGateway(ctx context.Context, ghr *gatewayv1alpha1.GatewayHostnameRequest, gw *gwapiv1.Gateway) error {
-	logger := log.FromContext(ctx)
-
-	if ghr.Status.CertificateArn == "" {
-		return fmt.Errorf("certificate ARN not set in status")
-	}
-
-	// Initialize annotations if needed
-	if gw.Annotations == nil {
-		gw.Annotations = make(map[string]string)
-	}
-
-	// Get existing certificate ARNs from annotation
-	existingCerts := []string{}
-	if certArns, ok := gw.Annotations[AnnotationCertificateARN]; ok && certArns != "" {
-		existingCerts = strings.Split(certArns, ",")
-	}
-
-	// Check if this certificate is already attached
-	certAlreadyAttached := false
-	for _, arn := range existingCerts {
-		if strings.TrimSpace(arn) == ghr.Status.CertificateArn {
-			certAlreadyAttached = true
-			break
-		}
-	}
-
-	if !certAlreadyAttached {
-		// Add the new certificate to the list
-		existingCerts = append(existingCerts, ghr.Status.CertificateArn)
-		gw.Annotations[AnnotationCertificateARN] = strings.Join(existingCerts, ",")
-
-		// Update certificate count annotation
-		certCount := len(existingCerts)
-		gw.Annotations[AnnotationCertificateCount] = fmt.Sprintf("%d", certCount)
-
-		if err := r.Update(ctx, gw); err != nil {
-			return fmt.Errorf("failed to update gateway annotations: %w", err)
-		}
-
-		logger.Info("Attached certificate to Gateway",
-			"gateway", gw.Name,
-			"certificateArn", ghr.Status.CertificateArn,
-			"totalCerts", certCount)
-	} else {
-		logger.Info("Certificate already attached to Gateway",
-			"gateway", gw.Name,
-			"certificateArn", ghr.Status.CertificateArn)
-	}
-
+	// Certificate attachment now happens via syncLoadBalancerConfiguration
+	// This function is kept for interface compatibility but does nothing
 	return nil
 }
 
-// removeCertificateFromGateway removes the ACM certificate ARN from the Gateway's annotations
+// removeCertificateFromGateway removes the certificate by re-syncing the LoadBalancerConfiguration
 func (r *GatewayHostnameRequestReconciler) removeCertificateFromGateway(ctx context.Context, ghr *gatewayv1alpha1.GatewayHostnameRequest) error {
 	logger := log.FromContext(ctx)
 
-	if ghr.Status.AssignedGateway == "" || ghr.Status.CertificateArn == "" {
+	if ghr.Status.AssignedGateway == "" {
 		return nil
 	}
 
+	// Get Gateway to find visibility setting
 	var gw gwapiv1.Gateway
 	err := r.Get(ctx, types.NamespacedName{
 		Name:      ghr.Status.AssignedGateway,
 		Namespace: ghr.Status.AssignedGatewayNamespace,
 	}, &gw)
 	if err != nil {
-		// Gateway might already be deleted
+		// Gateway might be deleted already
 		return nil
 	}
 
-	// Get existing certificate ARNs from annotation
-	if gw.Annotations == nil {
-		return nil
+	visibility := gw.Annotations[AnnotationVisibility]
+	if visibility == "" {
+		visibility = "internet-facing"
 	}
 
-	certArns, ok := gw.Annotations[AnnotationCertificateARN]
-	if !ok || certArns == "" {
-		return nil
-	}
-
-	existingCerts := strings.Split(certArns, ",")
-	newCerts := make([]string, 0, len(existingCerts))
-
-	// Filter out the certificate to remove
-	for _, arn := range existingCerts {
-		arn = strings.TrimSpace(arn)
-		if arn != "" && arn != ghr.Status.CertificateArn {
-			newCerts = append(newCerts, arn)
-		}
-	}
-
-	// Update the annotation
-	if len(newCerts) == 0 {
-		delete(gw.Annotations, AnnotationCertificateARN)
-	} else {
-		gw.Annotations[AnnotationCertificateARN] = strings.Join(newCerts, ",")
-	}
-
-	// Update certificate count
-	gw.Annotations[AnnotationCertificateCount] = fmt.Sprintf("%d", len(newCerts))
-
-	if err := r.Update(ctx, &gw); err != nil {
-		return fmt.Errorf("failed to update gateway annotations: %w", err)
+	// Re-sync LoadBalancerConfiguration (this will exclude the deleted GHR's certificate)
+	if err := r.syncLoadBalancerConfiguration(ctx, ghr.Status.AssignedGateway, ghr.Status.AssignedGatewayNamespace, visibility); err != nil {
+		return fmt.Errorf("failed to sync LoadBalancerConfiguration after certificate removal: %w", err)
 	}
 
 	logger.Info("Removed certificate from Gateway",
-		"gateway", gw.Name,
-		"certificateArn", ghr.Status.CertificateArn,
-		"remainingCerts", len(newCerts))
+		"gateway", ghr.Status.AssignedGateway,
+		"certificateArn", ghr.Status.CertificateArn)
 
 	return nil
 }

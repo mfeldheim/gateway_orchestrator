@@ -2,22 +2,23 @@
 
 ## Overview
 
-This document explains how the Gateway Orchestrator integrates with AWS Load Balancer Controller for certificate management.
+This document explains how the Gateway Orchestrator integrates with AWS Load Balancer Controller for certificate management using the `LoadBalancerConfiguration` CRD.
 
 ## Key Architecture Principle
 
-**We only manage three things:**
+**We manage four things:**
 1. **Gateway resources** (Kubernetes API)
-2. **Route53 DNS records** (AWS Route53 API)
-3. **ACM certificates** (AWS ACM API)
+2. **LoadBalancerConfiguration resources** (AWS LBC CRD for certificate/scheme config)
+3. **Route53 DNS records** (AWS Route53 API)
+4. **ACM certificates** (AWS ACM API)
 
-**AWS Load Balancer Controller manages everything else** (ALB provisioning, listener configuration, certificate attachment).
+**AWS Load Balancer Controller manages everything else** (ALB provisioning, listener configuration, certificate attachment to ALB).
 
 ## How It Works
 
 ### 1. Gateway Creation
 
-When creating a Gateway, we add AWS Load Balancer Controller annotations:
+When creating a Gateway, we reference a `LoadBalancerConfiguration`:
 
 ```yaml
 apiVersion: gateway.networking.k8s.io/v1
@@ -26,66 +27,89 @@ metadata:
   name: gw-01
   namespace: edge
   annotations:
-    # AWS Load Balancer Controller annotations
-    alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/target-type: ip
-    
-    # Our tracking annotations
     gateway.opendi.com/visibility: internet-facing
     gateway.opendi.com/certificate-count: "0"
 spec:
   gatewayClassName: aws-alb
+  infrastructure:
+    parametersRef:
+      group: gateway.k8s.aws
+      kind: LoadBalancerConfiguration
+      name: gw-01-config
   listeners:
     - name: https
       protocol: HTTPS
       port: 443
+      tls:
+        mode: Terminate
+        options:
+          gateway.opendi.com/acm-managed: "true"
     - name: http
       protocol: HTTP
       port: 80
 ```
 
+Note: Gateway API validation requires `certificateRefs` or `options` for TLS listeners. We use `options` with a marker annotation since actual certificates are managed via `LoadBalancerConfiguration`.
+
+### 2. LoadBalancerConfiguration
+
+For each Gateway, we create a corresponding `LoadBalancerConfiguration`:
+
+```yaml
+apiVersion: gateway.k8s.aws/v1beta1
+kind: LoadBalancerConfiguration
+metadata:
+  name: gw-01-config
+  namespace: edge
+spec:
+  scheme: internet-facing
+  listenerConfigurations:
+    - protocolPort: HTTPS:443
+      defaultCertificate: arn:aws:acm:eu-west-1:123456789:certificate/abc123
+      certificates:
+        - arn:aws:acm:eu-west-1:123456789:certificate/def456
+        - arn:aws:acm:eu-west-1:123456789:certificate/ghi789
+    - protocolPort: HTTP:80
+```
+
 **AWS Load Balancer Controller does:**
-- Provisions an ALB in AWS
-- Configures listeners (HTTP:80, HTTPS:443)
+- Reads `LoadBalancerConfiguration` via Gateway's `infrastructure.parametersRef`
+- Provisions ALB with the specified scheme
+- Configures HTTPS listener with the certificates (first is default, rest are SNI)
 - Updates Gateway status with LoadBalancer address
 
-### 2. Certificate Attachment
+### 3. Certificate Attachment Flow
 
 When a `GatewayHostnameRequest` is reconciled and an ACM certificate is issued:
 
 **We do:**
 ```go
-// Add certificate ARN to Gateway annotations
-gw.Annotations["alb.ingress.kubernetes.io/certificate-arn"] = certArn
-gw.Annotations["gateway.opendi.com/certificate-count"] = "1"
+// 1. Collect all certificate ARNs for the Gateway
+arns, _ := r.getGatewayCertificateARNs(ctx, gatewayName, gatewayNamespace)
 
-// Update the Gateway resource
-r.Update(ctx, gw)
+// 2. Create or update LoadBalancerConfiguration
+r.ensureLoadBalancerConfiguration(ctx, gatewayName, gatewayNamespace, arns, visibility)
 ```
 
-**AWS Load Balancer Controller does:**
-- Watches for Gateway annotation changes
-- Reads `alb.ingress.kubernetes.io/certificate-arn`
-- Calls ELBv2 API to attach certificate to ALB HTTPS listener
-- Handles SNI configuration for multiple certificates
+This ensures all certificates from all `GatewayHostnameRequests` assigned to a Gateway are included in its `LoadBalancerConfiguration`.
 
-### 3. Route53 ALIAS Record Creation
+### 4. Route53 ALIAS Record Creation
 
 **We do:**
 ```go
 // 1. Get LoadBalancer DNS from Gateway status (populated by AWS LBC)
 lbDNS := gw.Status.Addresses[0].Value
-// Example: k8s-edge-gw01-abc123.us-east-1.elb.amazonaws.com
+// Example: k8s-edge-gw01-abc123.eu-west-1.elb.amazonaws.com
 
 // 2. Extract region from DNS name
-region := aws.ExtractRegionFromALBDNS(lbDNS)  // "us-east-1"
+region := aws.ExtractRegionFromALBDNS(lbDNS)  // "eu-west-1"
 
 // 3. Look up well-known ALB hosted zone ID for the region
-hostedZoneID := aws.GetALBHostedZoneID(region)  // "Z35SXDOTRQ7X7K"
+hostedZoneID := aws.GetALBHostedZoneID(region)  // "Z32O12XQLNTSW2"
 
 // 4. Create Route53 ALIAS record
 record := aws.DNSRecord{
-    Name: "test.opendi.com",
+    Name: "test.example.com",
     Type: "A",
     AliasTarget: &aws.AliasTarget{
         DNSName:      lbDNS,
@@ -94,26 +118,6 @@ record := aws.DNSRecord{
 }
 route53Client.CreateOrUpdateRecord(ctx, userZoneId, record)
 ```
-
-**Why we don't need ELBv2 API:**
-- ALB canonical hosted zone IDs are **well-known public values** per region
-- We can extract the region from the LoadBalancer DNS name
-- No need to query ELBv2 `DescribeLoadBalancers` API
-
-### ALB Canonical Hosted Zone IDs by Region
-
-These are constants provided by AWS:
-
-| Region | Hosted Zone ID |
-|--------|---------------|
-| us-east-1 | Z35SXDOTRQ7X7K |
-| us-east-2 | Z3AADJGX6KTTL2 |
-| us-west-1 | Z368ELLRRE2KJ0 |
-| us-west-2 | Z1H1FL5HABSF5 |
-| eu-west-1 | Z32O12XQLNTSW2 |
-| eu-central-1 | Z215JYRZR1TBD5 |
-| ap-southeast-1 | Z1LMS91P8CMLE5 |
-| ... | (see `internal/aws/regions.go`) |
 
 ## Implementation Flow
 
@@ -128,12 +132,12 @@ GatewayHostnameRequest Created
          ↓
 [4] Select/Create Gateway
          ↓
-[5] Update Gateway Annotations ← WE DO THIS
-    (add certificate-arn)
+[5] Sync LoadBalancerConfiguration ← WE DO THIS
+    (collect all certs for Gateway, update config)
          ↓
     AWS Load Balancer Controller ← AWS LBC DOES THIS
          ↓
-    Provisions ALB + Attaches Certificate
+    Provisions ALB + Attaches Certificates
          ↓
     Updates Gateway Status
          ↓
@@ -152,7 +156,8 @@ GatewayHostnameRequest Created
 ## What We Manage vs AWS Load Balancer Controller
 
 ### We Manage
-✅ Gateway resources (create, update annotations)  
+✅ Gateway resources (create, update)  
+✅ LoadBalancerConfiguration resources (create, update with certs)  
 ✅ ACM certificates (request, describe, delete)  
 ✅ Route53 DNS records (validation CNAMEs, ALIAS records)  
 ✅ DomainClaims (first-come-first-serve)  
@@ -175,20 +180,20 @@ GatewayHostnameRequest Created
 
 ## Benefits of This Architecture
 
-### ✅ Maximum Simplicity
-- Only 2 AWS service clients needed (ACM, Route53)
-- No ELBv2 client required
-- Fewer dependencies, less code
+### ✅ Clean Separation via CRDs
+- Certificate configuration is declarative
+- Uses AWS LBC's native `LoadBalancerConfiguration` CRD
+- No annotation hacks
 
 ### ✅ Follows Kubernetes Patterns
-- Declarative configuration (Gateway resources)
+- Declarative configuration (Gateway + LoadBalancerConfiguration)
 - Single responsibility (AWS LBC manages infrastructure)
 - Clean separation of concerns
 
 ### ✅ Avoids All Race Conditions
 - No competition with AWS LBC
 - No conflicting AWS API calls
-- Single source of truth (Gateway resource)
+- Single source of truth (LoadBalancerConfiguration resource)
 
 ### ✅ Uses Well-Known Constants
 - ALB hosted zone IDs are public AWS constants
@@ -198,7 +203,8 @@ GatewayHostnameRequest Created
 ## Code Locations
 
 - **Gateway pool creation**: `internal/gateway/pool.go:CreateGateway()`
-- **Certificate attachment**: `internal/controller/gateway.go:attachCertificateToGateway()`
+- **LoadBalancerConfiguration sync**: `internal/controller/loadbalancerconfig.go`
+- **Certificate collection**: `internal/controller/loadbalancerconfig.go:getGatewayCertificateARNs()`
 - **Route53 ALIAS creation**: `internal/controller/gateway.go:ensureRoute53Alias()`
 - **Region extraction**: `internal/aws/regions.go:ExtractRegionFromALBDNS()`
 - **Hosted zone lookup**: `internal/aws/regions.go:GetALBHostedZoneID()`
@@ -212,7 +218,7 @@ In tests, mock the Gateway status updates to simulate AWS LBC behavior:
 gw.Status.Addresses = []gwapiv1.GatewayStatusAddress{
     {
         Type:  ptr(gwapiv1.HostnameAddressType),
-        Value: "k8s-edge-gw01-abc123.us-east-1.elb.amazonaws.com",
+        Value: "k8s-edge-gw01-abc123.eu-west-1.elb.amazonaws.com",
     },
 }
 ```
@@ -220,6 +226,6 @@ gw.Status.Addresses = []gwapiv1.GatewayStatusAddress{
 ## References
 
 - [AWS ALB Hosted Zone IDs](https://docs.aws.amazon.com/general/latest/gr/elb.html)
-- [AWS Load Balancer Controller Annotations](https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/guide/ingress/annotations/)
+- [AWS LBC LoadBalancerConfiguration](https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/guide/gateway/loadbalancerconfig/)
 - [Gateway API Spec](https://gateway-api.sigs.k8s.io/)
 - [Route53 ALIAS Records](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/resource-record-sets-choosing-alias-non-alias.html)

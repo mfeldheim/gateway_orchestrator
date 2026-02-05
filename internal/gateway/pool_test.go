@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -355,28 +356,25 @@ func TestPool_CreateGateway(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name           string
-		visibility     string
-		index          int
-		certificateARN string
+		name       string
+		visibility string
+		index      int
 	}{
 		{
-			name:           "create internet-facing gateway",
-			visibility:     "internet-facing",
-			index:          1,
-			certificateARN: "arn:aws:acm:us-east-1:123456789012:certificate/12345678-1234-1234-1234-123456789012",
+			name:       "create internet-facing gateway",
+			visibility: "internet-facing",
+			index:      1,
 		},
 		{
-			name:           "create internal gateway",
-			visibility:     "internal",
-			index:          2,
-			certificateARN: "arn:aws:acm:us-east-1:123456789012:certificate/87654321-4321-4321-4321-210987654321",
+			name:       "create internal gateway",
+			visibility: "internal",
+			index:      2,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			info, err := pool.CreateGateway(ctx, tt.visibility, tt.index, tt.certificateARN)
+			info, err := pool.CreateGateway(ctx, tt.visibility, tt.index)
 			if err != nil {
 				t.Fatalf("CreateGateway() error = %v", err)
 			}
@@ -407,9 +405,19 @@ func TestPool_CreateGateway(t *testing.T) {
 					gw.Annotations["gateway.opendi.com/visibility"], tt.visibility)
 			}
 
-			if gw.Annotations["alb.ingress.kubernetes.io/scheme"] != tt.visibility {
-				t.Errorf("scheme annotation = %v, want %v",
-					gw.Annotations["alb.ingress.kubernetes.io/scheme"], tt.visibility)
+			// Verify infrastructure.parametersRef
+			if gw.Spec.Infrastructure == nil || gw.Spec.Infrastructure.ParametersRef == nil {
+				t.Error("expected infrastructure.parametersRef to be set")
+			} else {
+				expectedConfigName := fmt.Sprintf("%s-config", info.Name)
+				if gw.Spec.Infrastructure.ParametersRef.Name != expectedConfigName {
+					t.Errorf("parametersRef.name = %v, want %v",
+						gw.Spec.Infrastructure.ParametersRef.Name, expectedConfigName)
+				}
+				if gw.Spec.Infrastructure.ParametersRef.Kind != "LoadBalancerConfiguration" {
+					t.Errorf("parametersRef.kind = %v, want LoadBalancerConfiguration",
+						gw.Spec.Infrastructure.ParametersRef.Kind)
+				}
 			}
 
 			// Verify listeners

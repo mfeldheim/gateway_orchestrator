@@ -61,6 +61,19 @@ rules:
   - get
   - patch
   - update
+# AWS Load Balancer Controller configuration CRDs
+- apiGroups:
+  - gateway.k8s.aws
+  resources:
+  - loadbalancerconfigurations
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
 # Events for observability
 - apiGroups:
   - ""

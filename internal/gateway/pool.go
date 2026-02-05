@@ -120,24 +120,33 @@ func (p *Pool) getGatewayInfo(gw *gwapiv1.Gateway) *GatewayInfo {
 	return info
 }
 
-// CreateGateway creates a new Gateway in the pool with an initial certificate
-func (p *Pool) CreateGateway(ctx context.Context, visibility string, index int, certificateARN string) (*GatewayInfo, error) {
+// CreateGateway creates a new Gateway in the pool
+// Certificate management is handled via LoadBalancerConfiguration, not the Gateway itself
+func (p *Pool) CreateGateway(ctx context.Context, visibility string, index int) (*GatewayInfo, error) {
 	name := fmt.Sprintf("gw-%02d", index)
+	configName := fmt.Sprintf("%s-config", name)
 
 	gw := &gwapiv1.Gateway{}
 	gw.Name = name
 	gw.Namespace = p.namespace
 	gw.Annotations = map[string]string{
 		"gateway.opendi.com/visibility":        visibility,
-		"gateway.opendi.com/certificate-count": "1", // Starting with one certificate
+		"gateway.opendi.com/certificate-count": "0",
 		"gateway.opendi.com/rule-count":        "0",
-		"alb.ingress.kubernetes.io/scheme":     visibility,        // AWS LBC annotation for ALB scheme
-		"alb.ingress.kubernetes.io/certificate-arn": certificateARN, // Initial certificate
 	}
 	gw.Spec.GatewayClassName = gwapiv1.ObjectName(p.gatewayClass)
 
-	// Configure listeners based on visibility
-	// AWS Load Balancer Controller will provision the ALB
+	// Reference LoadBalancerConfiguration for LB settings (scheme, certificates, etc.)
+	gw.Spec.Infrastructure = &gwapiv1.GatewayInfrastructure{
+		ParametersRef: &gwapiv1.LocalParametersReference{
+			Group: "gateway.k8s.aws",
+			Kind:  "LoadBalancerConfiguration",
+			Name:  configName,
+		},
+	}
+
+	// Configure listeners
+	// TLS options satisfy Gateway API validation; actual certs come from LoadBalancerConfiguration
 	gw.Spec.Listeners = []gwapiv1.Listener{
 		{
 			Name:     "https",
@@ -146,7 +155,7 @@ func (p *Pool) CreateGateway(ctx context.Context, visibility string, index int, 
 			TLS: &gwapiv1.ListenerTLSConfig{
 				Mode: ptrTo(gwapiv1.TLSModeTerminate),
 				// Use Options to satisfy Gateway API validation (requires certificateRefs OR options)
-				// Actual certificates attached via alb.ingress.kubernetes.io/certificate-arn annotation
+				// Actual certificates come from LoadBalancerConfiguration
 				Options: map[gwapiv1.AnnotationKey]gwapiv1.AnnotationValue{
 					"gateway.opendi.com/acm-managed": "true",
 				},
