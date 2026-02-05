@@ -145,8 +145,11 @@ func (p *Pool) CreateGateway(ctx context.Context, visibility string, index int, 
 			Port:     443,
 			TLS: &gwapiv1.ListenerTLSConfig{
 				Mode: ptrTo(gwapiv1.TLSModeTerminate),
-				// Certificate attached via alb.ingress.kubernetes.io/certificate-arn annotation
-				// AWS Load Balancer Controller handles the actual attachment to ALB
+				// Use Options to satisfy Gateway API validation (requires certificateRefs OR options)
+				// Actual certificates attached via alb.ingress.kubernetes.io/certificate-arn annotation
+				Options: map[gwapiv1.AnnotationKey]gwapiv1.AnnotationValue{
+					"gateway.opendi.com/acm-managed": "true",
+				},
 			},
 		},
 		{
