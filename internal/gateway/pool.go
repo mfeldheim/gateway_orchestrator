@@ -34,6 +34,11 @@ func NewPool(c client.Client, namespace, gatewayClass string) *Pool {
 	}
 }
 
+// Namespace returns the namespace where Gateways are created
+func (p *Pool) Namespace() string {
+	return p.namespace
+}
+
 // GatewayInfo holds Gateway metadata and capacity info
 type GatewayInfo struct {
 	Name             string

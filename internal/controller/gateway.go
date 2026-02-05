@@ -65,20 +65,36 @@ func (r *GatewayHostnameRequestReconciler) ensureGatewayAssignment(ctx context.C
 			return fmt.Errorf("failed to get next gateway index: %w", err)
 		}
 
-		// Create Gateway (without certificate - that comes via LoadBalancerConfiguration)
+		gatewayName := fmt.Sprintf("gw-%02d", index)
+		gatewayNamespace := r.GatewayPool.Namespace()
+
+		// Create LoadBalancerConfiguration FIRST with the initial certificate
+		initialCerts := []string{ghr.Status.CertificateArn}
+		if err := r.ensureLoadBalancerConfiguration(ctx, gatewayName, gatewayNamespace, initialCerts, visibility); err != nil {
+			return fmt.Errorf("failed to create LoadBalancerConfiguration: %w", err)
+		}
+
+		// Now create Gateway referencing the LoadBalancerConfiguration
 		gwInfo, err = r.GatewayPool.CreateGateway(ctx, visibility, index)
 		if err != nil {
 			return fmt.Errorf("failed to create new gateway: %w", err)
 		}
-		logger.Info("Created new Gateway", "name", gwInfo.Name, "index", index)
+		logger.Info("Created new Gateway with LoadBalancerConfiguration", "name", gwInfo.Name, "index", index)
+
+		// Update status with assigned Gateway
+		ghr.Status.AssignedGateway = gwInfo.Name
+		ghr.Status.AssignedGatewayNamespace = gwInfo.Namespace
+
+		logger.Info("Successfully assigned to Gateway", "gateway", gwInfo.Name, "hostname", ghr.Spec.Hostname)
+		return nil
 	}
 
-	// Update status with assigned Gateway
+	// Update status with assigned Gateway (existing Gateway case)
 	ghr.Status.AssignedGateway = gwInfo.Name
 	ghr.Status.AssignedGatewayNamespace = gwInfo.Namespace
 
-	// Attach certificate via LoadBalancerConfiguration
-	if err := r.syncLoadBalancerConfiguration(ctx, gwInfo.Name, gwInfo.Namespace, visibility); err != nil {
+	// Sync LoadBalancerConfiguration to add this certificate to existing Gateway
+	if err := r.syncLoadBalancerConfiguration(ctx, gwInfo.Name, gwInfo.Namespace, visibility, ghr.Status.CertificateArn); err != nil {
 		return fmt.Errorf("failed to sync LoadBalancerConfiguration: %w", err)
 	}
 
@@ -87,11 +103,26 @@ func (r *GatewayHostnameRequestReconciler) ensureGatewayAssignment(ctx context.C
 }
 
 // syncLoadBalancerConfiguration collects all certificate ARNs for a Gateway and updates its LoadBalancerConfiguration
-func (r *GatewayHostnameRequestReconciler) syncLoadBalancerConfiguration(ctx context.Context, gatewayName, gatewayNamespace, visibility string) error {
+// If newCertARN is provided, it's included even if the GHR isn't assigned yet
+func (r *GatewayHostnameRequestReconciler) syncLoadBalancerConfiguration(ctx context.Context, gatewayName, gatewayNamespace, visibility, newCertARN string) error {
 	// Collect all certificate ARNs from GatewayHostnameRequests assigned to this Gateway
 	arns, err := r.getGatewayCertificateARNs(ctx, gatewayName, gatewayNamespace)
 	if err != nil {
 		return err
+	}
+
+	// Add the new cert if not already in the list
+	if newCertARN != "" {
+		found := false
+		for _, arn := range arns {
+			if arn == newCertARN {
+				found = true
+				break
+			}
+		}
+		if !found {
+			arns = append(arns, newCertARN)
+		}
 	}
 
 	// Create or update the LoadBalancerConfiguration
@@ -131,7 +162,7 @@ func (r *GatewayHostnameRequestReconciler) removeCertificateFromGateway(ctx cont
 	}
 
 	// Re-sync LoadBalancerConfiguration (this will exclude the deleted GHR's certificate)
-	if err := r.syncLoadBalancerConfiguration(ctx, ghr.Status.AssignedGateway, ghr.Status.AssignedGatewayNamespace, visibility); err != nil {
+	if err := r.syncLoadBalancerConfiguration(ctx, ghr.Status.AssignedGateway, ghr.Status.AssignedGatewayNamespace, visibility, ""); err != nil {
 		return fmt.Errorf("failed to sync LoadBalancerConfiguration after certificate removal: %w", err)
 	}
 
