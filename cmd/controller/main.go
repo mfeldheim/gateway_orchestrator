@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
+	"go.uber.org/zap/zapcore"
 
 	gatewayv1alpha1 "github.com/michelfeldheim/gateway-orchestrator/api/v1alpha1"
 	"github.com/michelfeldheim/gateway-orchestrator/internal/aws"
@@ -52,6 +53,7 @@ func main() {
 	opts := zap.Options{
 		Development: true,
 	}
+	opts.StacktraceLevel = zapcore.FatalLevel
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
