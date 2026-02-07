@@ -131,10 +131,10 @@ func (r *GatewayHostnameRequestReconciler) reconcileNormal(ctx context.Context, 
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Drift detection: Verify critical resources still exist, even if conditions are True
-	if err := r.detectAndFixDrift(ctx, ghr); err != nil {
-		logger.Error(err, "Drift detection failed")
-		// Continue with reconciliation anyway - drift fix will be attempted
+	// Validate assigned resources still exist (drift detection)
+	if err := r.validateAssignedResources(ctx, ghr); err != nil {
+		logger.Error(err, "Resource validation failed")
+		// Continue with reconciliation anyway - resources will be recreated if needed
 	}
 
 	// Step 1: Validate request
@@ -246,6 +246,7 @@ func (r *GatewayHostnameRequestReconciler) reconcileNormal(ctx context.Context, 
 	}
 
 	// Step 8: Label namespace for gateway access and configure allowedRoutes
+	// These run every reconciliation to ensure configuration stays correct (idempotent)
 	if err := r.ensureNamespaceLabel(ctx, ghr); err != nil {
 		logger.Info("Failed to label namespace for gateway access", "error", err.Error())
 		// Don't fail reconciliation for this, just log it
@@ -253,6 +254,14 @@ func (r *GatewayHostnameRequestReconciler) reconcileNormal(ctx context.Context, 
 	if err := r.ensureAllowedRoutes(ctx, ghr); err != nil {
 		logger.Info("Failed to configure allowedRoutes, continuing anyway", "error", err.Error())
 		// Don't fail reconciliation for this, just log it
+	}
+
+	// Continuously sync Gateway configuration (idempotent drift correction)
+	if ghr.Status.AssignedGateway != "" {
+		if err := r.ensureGatewayConfiguration(ctx, ghr); err != nil {
+			logger.Info("Failed to sync Gateway configuration", "error", err.Error())
+			// Don't fail reconciliation, will retry on next reconcile
+		}
 	}
 
 	// Step 9: Mark as Ready and update observed generation/hash
@@ -508,8 +517,62 @@ func (r *GatewayHostnameRequestReconciler) cleanupForReprovisioning(ctx context.
 	return nil
 }
 
-// detectAndFixDrift checks if resources still exist and fixes drift by clearing conditions
-func (r *GatewayHostnameRequestReconciler) detectAndFixDrift(ctx context.Context, ghr *gatewayv1alpha1.GatewayHostnameRequest) error {
+// ensureGatewayConfiguration ensures Gateway and LoadBalancerConfiguration have correct settings
+// This runs every reconciliation to correct configuration drift (idempotent)
+func (r *GatewayHostnameRequestReconciler) ensureGatewayConfiguration(ctx context.Context, ghr *gatewayv1alpha1.GatewayHostnameRequest) error {
+	logger := log.FromContext(ctx)
+
+	// Ensure LoadBalancerConfiguration is synced with current certificate list
+	visibility := ghr.Spec.Visibility
+	if visibility == "" {
+		visibility = "internet-facing"
+	}
+	
+	if err := r.syncLoadBalancerConfiguration(ctx, ghr.Status.AssignedGateway, ghr.Status.AssignedGatewayNamespace, visibility, ghr.Status.CertificateArn); err != nil {
+		logger.Info("Failed to sync LoadBalancerConfiguration", "error", err)
+		return err
+	}
+
+	// Ensure Gateway has correct annotations
+	var gw gwapiv1.Gateway
+	if err := r.Get(ctx, types.NamespacedName{
+		Name:      ghr.Status.AssignedGateway,
+		Namespace: ghr.Status.AssignedGatewayNamespace,
+	}, &gw); err != nil {
+		return fmt.Errorf("failed to get gateway: %w", err)
+	}
+
+	needsUpdate := false
+	if gw.Annotations == nil {
+		gw.Annotations = make(map[string]string)
+	}
+
+	// Ensure loadbalancer-configuration annotation
+	configName := fmt.Sprintf("%s-config", ghr.Status.AssignedGateway)
+	if gw.Annotations["gateway.k8s.aws/loadbalancer-configuration"] != configName {
+		gw.Annotations["gateway.k8s.aws/loadbalancer-configuration"] = configName
+		needsUpdate = true
+	}
+
+	// Ensure visibility annotation matches spec
+	if gw.Annotations["gateway.opendi.com/visibility"] != visibility {
+		gw.Annotations["gateway.opendi.com/visibility"] = visibility
+		needsUpdate = true
+	}
+
+	if needsUpdate {
+		if err := r.Update(ctx, &gw); err != nil {
+			return fmt.Errorf("failed to update gateway annotations: %w", err)
+		}
+		logger.Info("Updated Gateway annotations to correct drift")
+	}
+
+	return nil
+}
+
+// validateAssignedResources checks if assigned resources still exist and clears conditions if not
+// This handles the case where resources are manually deleted outside the controller
+func (r *GatewayHostnameRequestReconciler) validateAssignedResources(ctx context.Context, ghr *gatewayv1alpha1.GatewayHostnameRequest) error {
 	logger := log.FromContext(ctx)
 	driftDetected := false
 
