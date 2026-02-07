@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -19,7 +20,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
-	lbconfigv1beta1 "sigs.k8s.io/gateway-api-aws-controller/api/v1beta1"
 
 	gatewayv1alpha1 "github.com/michelfeldheim/gateway-orchestrator/api/v1alpha1"
 	"github.com/michelfeldheim/gateway-orchestrator/internal/aws"
@@ -536,11 +536,12 @@ func (r *GatewayHostnameRequestReconciler) detectAndFixDrift(ctx context.Context
 		} else {
 			// Gateway exists, check if LoadBalancerConfiguration exists
 			lbcName := fmt.Sprintf("%s-config", ghr.Status.AssignedGateway)
-			var lbc lbconfigv1beta1.LoadBalancerConfiguration
+			lbc := &unstructured.Unstructured{}
+			lbc.SetGroupVersionKind(LoadBalancerConfigurationGVK)
 			err = r.Get(ctx, types.NamespacedName{
 				Name:      lbcName,
 				Namespace: ghr.Status.AssignedGatewayNamespace,
-			}, &lbc)
+			}, lbc)
 			if err != nil && errors.IsNotFound(err) {
 				logger.Info("Drift detected: LoadBalancerConfiguration no longer exists", "name", lbcName)
 				r.Recorder.Eventf(ghr, corev1.EventTypeWarning, "DriftDetected", "LoadBalancerConfiguration %s no longer exists", lbcName)
