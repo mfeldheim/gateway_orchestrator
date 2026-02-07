@@ -8,14 +8,18 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
+	lbconfigv1beta1 "sigs.k8s.io/gateway-api-aws-controller/api/v1beta1"
 
 	gatewayv1alpha1 "github.com/michelfeldheim/gateway-orchestrator/api/v1alpha1"
 	"github.com/michelfeldheim/gateway-orchestrator/internal/aws"
@@ -125,6 +129,12 @@ func (r *GatewayHostnameRequestReconciler) reconcileNormal(ctx context.Context, 
 
 		// Requeue to start fresh reconciliation
 		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// Drift detection: Verify critical resources still exist, even if conditions are True
+	if err := r.detectAndFixDrift(ctx, ghr); err != nil {
+		logger.Error(err, "Drift detection failed")
+		// Continue with reconciliation anyway - drift fix will be attempted
 	}
 
 	// Step 1: Validate request
@@ -493,6 +503,90 @@ func (r *GatewayHostnameRequestReconciler) cleanupForReprovisioning(ctx context.
 		logger.Error(err, "Failed to delete domain claim during reprovisioning")
 	} else {
 		logger.Info("Released domain claim during reprovisioning")
+	}
+
+	return nil
+}
+
+// detectAndFixDrift checks if resources still exist and fixes drift by clearing conditions
+func (r *GatewayHostnameRequestReconciler) detectAndFixDrift(ctx context.Context, ghr *gatewayv1alpha1.GatewayHostnameRequest) error {
+	logger := log.FromContext(ctx)
+	driftDetected := false
+
+	// Check if assigned Gateway still exists
+	if ghr.Status.AssignedGateway != "" && meta.IsStatusConditionTrue(ghr.Status.Conditions, ConditionTypeListenerAttached) {
+		var gw gwapiv1.Gateway
+		err := r.Get(ctx, types.NamespacedName{
+			Name:      ghr.Status.AssignedGateway,
+			Namespace: ghr.Status.AssignedGatewayNamespace,
+		}, &gw)
+		if err != nil {
+			if errors.IsNotFound(err) {
+				logger.Info("Drift detected: Gateway no longer exists", "gateway", ghr.Status.AssignedGateway)
+				r.Recorder.Eventf(ghr, corev1.EventTypeWarning, "DriftDetected", "Gateway %s no longer exists", ghr.Status.AssignedGateway)
+				// Clear conditions to trigger reassignment
+				meta.RemoveStatusCondition(&ghr.Status.Conditions, ConditionTypeListenerAttached)
+				meta.RemoveStatusCondition(&ghr.Status.Conditions, ConditionTypeDnsAliasReady)
+				meta.RemoveStatusCondition(&ghr.Status.Conditions, ConditionTypeReady)
+				ghr.Status.AssignedGateway = ""
+				ghr.Status.AssignedGatewayNamespace = ""
+				ghr.Status.AssignedLoadBalancer = ""
+				driftDetected = true
+			}
+		} else {
+			// Gateway exists, check if LoadBalancerConfiguration exists
+			lbcName := fmt.Sprintf("%s-config", ghr.Status.AssignedGateway)
+			var lbc lbconfigv1beta1.LoadBalancerConfiguration
+			err = r.Get(ctx, types.NamespacedName{
+				Name:      lbcName,
+				Namespace: ghr.Status.AssignedGatewayNamespace,
+			}, &lbc)
+			if err != nil && errors.IsNotFound(err) {
+				logger.Info("Drift detected: LoadBalancerConfiguration no longer exists", "name", lbcName)
+				r.Recorder.Eventf(ghr, corev1.EventTypeWarning, "DriftDetected", "LoadBalancerConfiguration %s no longer exists", lbcName)
+				// Clear condition to trigger recreation
+				meta.RemoveStatusCondition(&ghr.Status.Conditions, ConditionTypeListenerAttached)
+				meta.RemoveStatusCondition(&ghr.Status.Conditions, ConditionTypeDnsAliasReady)
+				meta.RemoveStatusCondition(&ghr.Status.Conditions, ConditionTypeReady)
+				driftDetected = true
+			}
+		}
+	}
+
+	// Check if ACM certificate still exists
+	if ghr.Status.CertificateArn != "" && meta.IsStatusConditionTrue(ghr.Status.Conditions, ConditionTypeCertificateIssued) {
+		status, err := r.ACMClient.GetCertificateStatus(ctx, ghr.Status.CertificateArn)
+		if err != nil {
+			logger.Info("Drift detected: ACM certificate no longer exists or is inaccessible", "arn", ghr.Status.CertificateArn, "error", err)
+			r.Recorder.Eventf(ghr, corev1.EventTypeWarning, "DriftDetected", "ACM certificate %s no longer exists", ghr.Status.CertificateArn)
+			// Clear conditions to trigger recreation
+			meta.RemoveStatusCondition(&ghr.Status.Conditions, ConditionTypeCertificateIssued)
+			meta.RemoveStatusCondition(&ghr.Status.Conditions, ConditionTypeDnsValidated)
+			meta.RemoveStatusCondition(&ghr.Status.Conditions, ConditionTypeListenerAttached)
+			meta.RemoveStatusCondition(&ghr.Status.Conditions, ConditionTypeDnsAliasReady)
+			meta.RemoveStatusCondition(&ghr.Status.Conditions, ConditionTypeReady)
+			ghr.Status.CertificateArn = ""
+			driftDetected = true
+		} else if status == "FAILED" || status == "REVOKED" {
+			logger.Info("Drift detected: ACM certificate in bad state", "arn", ghr.Status.CertificateArn, "status", status)
+			r.Recorder.Eventf(ghr, corev1.EventTypeWarning, "CertificateFailed", "ACM certificate is in %s state", status)
+			// Clear conditions to trigger recreation
+			meta.RemoveStatusCondition(&ghr.Status.Conditions, ConditionTypeCertificateIssued)
+			meta.RemoveStatusCondition(&ghr.Status.Conditions, ConditionTypeDnsValidated)
+			meta.RemoveStatusCondition(&ghr.Status.Conditions, ConditionTypeListenerAttached)
+			meta.RemoveStatusCondition(&ghr.Status.Conditions, ConditionTypeDnsAliasReady)
+			meta.RemoveStatusCondition(&ghr.Status.Conditions, ConditionTypeReady)
+			ghr.Status.CertificateArn = ""
+			driftDetected = true
+		}
+	}
+
+	// If drift detected, update status to trigger re-reconciliation
+	if driftDetected {
+		if err := r.Status().Update(ctx, ghr); err != nil {
+			return fmt.Errorf("failed to update status after drift detection: %w", err)
+		}
+		logger.Info("Drift fixed, re-reconciliation will occur")
 	}
 
 	return nil
