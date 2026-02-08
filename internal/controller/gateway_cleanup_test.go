@@ -96,7 +96,7 @@ func TestCleanupEmptyGateway_RaceCondition_IgnoresOtherNamespaceAssignments(t *t
 			Namespace: "other-ns",
 		},
 		Status: gatewayv1alpha1.GatewayHostnameRequestStatus{
-			AssignedGateway:          "gw-01", // same gateway name, different namespace
+			AssignedGateway:          "gw-01",      // same gateway name, different namespace
 			AssignedGatewayNamespace: "other-edge", // different namespace
 		},
 	}
@@ -296,4 +296,3 @@ func TestCleanupEmptyGateway_WithLoadBalancerConfig_DeletesBoth(t *testing.T) {
 	err = client.Get(context.Background(), types.NamespacedName{Name: "gw-01-config", Namespace: "edge"}, &deletedLBC)
 	assert.Error(t, err)
 }
-
