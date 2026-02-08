@@ -508,3 +508,48 @@ func TestPool_NewPool_DefaultPorts(t *testing.T) {
 		t.Errorf("HTTPSPort() = %d, want 443", pool.HTTPSPort())
 	}
 }
+
+func TestPool_CreateGateway_AllowedRoutesFromAll(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = gwapiv1.AddToScheme(scheme)
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	pool := NewPool(client, "edge", "aws-alb", 0, 0)
+	ctx := context.Background()
+
+	info, err := pool.CreateGateway(ctx, "internet-facing", "", 1)
+	if err != nil {
+		t.Fatalf("CreateGateway() error = %v", err)
+	}
+
+	// Verify the Gateway was created
+	var gw gwapiv1.Gateway
+	err = client.Get(ctx, types.NamespacedName{Name: info.Name, Namespace: "edge"}, &gw)
+	if err != nil {
+		t.Fatalf("gateway not created: %v", err)
+	}
+
+	// Verify both listeners have AllowedRoutes set to FromAll
+	fromAll := gwapiv1.NamespacesFromAll
+	for _, l := range gw.Spec.Listeners {
+		if l.AllowedRoutes == nil {
+			t.Errorf("listener %s: AllowedRoutes is nil", l.Name)
+			continue
+		}
+		if l.AllowedRoutes.Namespaces == nil {
+			t.Errorf("listener %s: AllowedRoutes.Namespaces is nil", l.Name)
+			continue
+		}
+		if l.AllowedRoutes.Namespaces.From == nil {
+			t.Errorf("listener %s: AllowedRoutes.Namespaces.From is nil", l.Name)
+			continue
+		}
+		if *l.AllowedRoutes.Namespaces.From != fromAll {
+			t.Errorf("listener %s: AllowedRoutes.Namespaces.From = %v, want %v",
+				l.Name, *l.AllowedRoutes.Namespaces.From, fromAll)
+		}
+	}
+}

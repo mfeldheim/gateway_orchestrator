@@ -191,11 +191,21 @@ func (p *Pool) CreateGateway(ctx context.Context, visibility string, wafArn stri
 
 	// Configure listeners with configurable ports
 	// TLS options satisfy Gateway API validation; actual certs come from LoadBalancerConfiguration
+	// AllowedRoutes: Allow HTTPRoutes from ALL namespaces. Security is enforced by
+	// HostnameGrant + policy engine (Kyverno/Gatekeeper), not by Gateway allowedRoutes.
+	fromAll := gwapiv1.NamespacesFromAll
+	allowedRoutes := &gwapiv1.AllowedRoutes{
+		Namespaces: &gwapiv1.RouteNamespaces{
+			From: &fromAll,
+		},
+	}
+
 	gw.Spec.Listeners = []gwapiv1.Listener{
 		{
-			Name:     "https",
-			Protocol: gwapiv1.HTTPSProtocolType,
-			Port:     gwapiv1.PortNumber(p.httpsPort),
+			Name:          "https",
+			Protocol:      gwapiv1.HTTPSProtocolType,
+			Port:          gwapiv1.PortNumber(p.httpsPort),
+			AllowedRoutes: allowedRoutes,
 			TLS: &gwapiv1.ListenerTLSConfig{
 				Mode: ptrTo(gwapiv1.TLSModeTerminate),
 				// Use Options to satisfy Gateway API validation (requires certificateRefs OR options)
@@ -206,9 +216,10 @@ func (p *Pool) CreateGateway(ctx context.Context, visibility string, wafArn stri
 			},
 		},
 		{
-			Name:     "http",
-			Protocol: gwapiv1.HTTPProtocolType,
-			Port:     gwapiv1.PortNumber(p.httpPort),
+			Name:          "http",
+			Protocol:      gwapiv1.HTTPProtocolType,
+			Port:          gwapiv1.PortNumber(p.httpPort),
+			AllowedRoutes: allowedRoutes,
 		},
 	}
 

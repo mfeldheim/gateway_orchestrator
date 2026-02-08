@@ -502,3 +502,257 @@ func TestEnsureGatewayConfiguration_NoUpdateNeeded(t *testing.T) {
 		t.Error("visibility annotation was incorrectly modified")
 	}
 }
+
+func TestEnsureAllowedRoutes_SetsFromAll(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = gatewayv1alpha1.AddToScheme(scheme)
+	_ = gwapiv1.Install(scheme)
+
+	// Gateway without allowedRoutes (defaults to SameNamespace)
+	gateway := &gwapiv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "gw-01",
+			Namespace: "edge",
+		},
+		Spec: gwapiv1.GatewaySpec{
+			GatewayClassName: "aws-alb",
+			Listeners: []gwapiv1.Listener{
+				{
+					Name:     "https",
+					Protocol: gwapiv1.HTTPSProtocolType,
+					Port:     443,
+				},
+				{
+					Name:     "http",
+					Protocol: gwapiv1.HTTPProtocolType,
+					Port:     80,
+				},
+			},
+		},
+	}
+
+	ghr := &gatewayv1alpha1.GatewayHostnameRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-request",
+			Namespace: "my-app",
+		},
+		Spec: gatewayv1alpha1.GatewayHostnameRequestSpec{
+			Hostname: "test.opendi.com",
+			ZoneId:   "Z123",
+		},
+		Status: gatewayv1alpha1.GatewayHostnameRequestStatus{
+			AssignedGateway:          "gw-01",
+			AssignedGatewayNamespace: "edge",
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(gateway, ghr).
+		Build()
+
+	reconciler := &GatewayHostnameRequestReconciler{
+		Client:   fakeClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	err := reconciler.ensureAllowedRoutes(context.Background(), ghr)
+	if err != nil {
+		t.Fatalf("ensureAllowedRoutes() returned error: %v", err)
+	}
+
+	// Verify Gateway was updated with FromAll
+	var updatedGw gwapiv1.Gateway
+	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "gw-01", Namespace: "edge"}, &updatedGw)
+	if err != nil {
+		t.Fatalf("Failed to get Gateway: %v", err)
+	}
+
+	fromAll := gwapiv1.NamespacesFromAll
+	for _, l := range updatedGw.Spec.Listeners {
+		if l.AllowedRoutes == nil {
+			t.Errorf("listener %s: AllowedRoutes is nil after ensureAllowedRoutes", l.Name)
+			continue
+		}
+		if l.AllowedRoutes.Namespaces == nil || l.AllowedRoutes.Namespaces.From == nil {
+			t.Errorf("listener %s: AllowedRoutes.Namespaces.From is nil", l.Name)
+			continue
+		}
+		if *l.AllowedRoutes.Namespaces.From != fromAll {
+			t.Errorf("listener %s: AllowedRoutes.Namespaces.From = %v, want %v",
+				l.Name, *l.AllowedRoutes.Namespaces.From, fromAll)
+		}
+	}
+}
+
+func TestEnsureAllowedRoutes_FixesSameNamespace(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = gatewayv1alpha1.AddToScheme(scheme)
+	_ = gwapiv1.Install(scheme)
+
+	// Gateway with SameNamespace (wrong value that needs drift correction)
+	fromSame := gwapiv1.NamespacesFromSame
+	gateway := &gwapiv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "gw-01",
+			Namespace: "edge",
+		},
+		Spec: gwapiv1.GatewaySpec{
+			GatewayClassName: "aws-alb",
+			Listeners: []gwapiv1.Listener{
+				{
+					Name:     "https",
+					Protocol: gwapiv1.HTTPSProtocolType,
+					Port:     443,
+					AllowedRoutes: &gwapiv1.AllowedRoutes{
+						Namespaces: &gwapiv1.RouteNamespaces{
+							From: &fromSame,
+						},
+					},
+				},
+				{
+					Name:     "http",
+					Protocol: gwapiv1.HTTPProtocolType,
+					Port:     80,
+					AllowedRoutes: &gwapiv1.AllowedRoutes{
+						Namespaces: &gwapiv1.RouteNamespaces{
+							From: &fromSame,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	ghr := &gatewayv1alpha1.GatewayHostnameRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-request",
+			Namespace: "my-app",
+		},
+		Spec: gatewayv1alpha1.GatewayHostnameRequestSpec{
+			Hostname: "test.opendi.com",
+			ZoneId:   "Z123",
+		},
+		Status: gatewayv1alpha1.GatewayHostnameRequestStatus{
+			AssignedGateway:          "gw-01",
+			AssignedGatewayNamespace: "edge",
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(gateway, ghr).
+		Build()
+
+	reconciler := &GatewayHostnameRequestReconciler{
+		Client:   fakeClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	err := reconciler.ensureAllowedRoutes(context.Background(), ghr)
+	if err != nil {
+		t.Fatalf("ensureAllowedRoutes() returned error: %v", err)
+	}
+
+	var updatedGw gwapiv1.Gateway
+	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "gw-01", Namespace: "edge"}, &updatedGw)
+	if err != nil {
+		t.Fatalf("Failed to get Gateway: %v", err)
+	}
+
+	fromAll := gwapiv1.NamespacesFromAll
+	for _, l := range updatedGw.Spec.Listeners {
+		if *l.AllowedRoutes.Namespaces.From != fromAll {
+			t.Errorf("listener %s: expected FromAll after drift correction, got %v",
+				l.Name, *l.AllowedRoutes.Namespaces.From)
+		}
+	}
+}
+
+func TestEnsureAllowedRoutes_Idempotent(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = gatewayv1alpha1.AddToScheme(scheme)
+	_ = gwapiv1.Install(scheme)
+
+	// Gateway already correctly configured with FromAll
+	fromAll := gwapiv1.NamespacesFromAll
+	gateway := &gwapiv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "gw-01",
+			Namespace: "edge",
+		},
+		Spec: gwapiv1.GatewaySpec{
+			GatewayClassName: "aws-alb",
+			Listeners: []gwapiv1.Listener{
+				{
+					Name:     "https",
+					Protocol: gwapiv1.HTTPSProtocolType,
+					Port:     443,
+					AllowedRoutes: &gwapiv1.AllowedRoutes{
+						Namespaces: &gwapiv1.RouteNamespaces{
+							From: &fromAll,
+						},
+					},
+				},
+				{
+					Name:     "http",
+					Protocol: gwapiv1.HTTPProtocolType,
+					Port:     80,
+					AllowedRoutes: &gwapiv1.AllowedRoutes{
+						Namespaces: &gwapiv1.RouteNamespaces{
+							From: &fromAll,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	ghr := &gatewayv1alpha1.GatewayHostnameRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-request",
+			Namespace: "my-app",
+		},
+		Spec: gatewayv1alpha1.GatewayHostnameRequestSpec{
+			Hostname: "test.opendi.com",
+			ZoneId:   "Z123",
+		},
+		Status: gatewayv1alpha1.GatewayHostnameRequestStatus{
+			AssignedGateway:          "gw-01",
+			AssignedGatewayNamespace: "edge",
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(gateway, ghr).
+		Build()
+
+	reconciler := &GatewayHostnameRequestReconciler{
+		Client:   fakeClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	// Should succeed without error and not modify the gateway
+	err := reconciler.ensureAllowedRoutes(context.Background(), ghr)
+	if err != nil {
+		t.Fatalf("ensureAllowedRoutes() returned error: %v", err)
+	}
+
+	var updatedGw gwapiv1.Gateway
+	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "gw-01", Namespace: "edge"}, &updatedGw)
+	if err != nil {
+		t.Fatalf("Failed to get Gateway: %v", err)
+	}
+
+	// Verify still FromAll
+	for _, l := range updatedGw.Spec.Listeners {
+		if *l.AllowedRoutes.Namespaces.From != fromAll {
+			t.Errorf("listener %s: AllowedRoutes changed from FromAll to %v",
+				l.Name, *l.AllowedRoutes.Namespaces.From)
+		}
+	}
+}

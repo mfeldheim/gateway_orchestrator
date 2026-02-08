@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -189,7 +188,9 @@ func (r *GatewayHostnameRequestReconciler) removeCertificateFromGateway(ctx cont
 	return nil
 }
 
-// ensureAllowedRoutes updates the Gateway to allow HTTPRoutes from the requesting namespace
+// ensureAllowedRoutes ensures the Gateway allows HTTPRoutes from all namespaces.
+// Security is enforced by HostnameGrant + policy engine (Kyverno/Gatekeeper),
+// not by Gateway allowedRoutes restrictions.
 func (r *GatewayHostnameRequestReconciler) ensureAllowedRoutes(ctx context.Context, ghr *gatewayv1alpha1.GatewayHostnameRequest) error {
 	logger := log.FromContext(ctx)
 
@@ -206,37 +207,23 @@ func (r *GatewayHostnameRequestReconciler) ensureAllowedRoutes(ctx context.Conte
 		return fmt.Errorf("failed to get gateway: %w", err)
 	}
 
-	// Find the HTTPS listener
 	updated := false
+	fromAll := gwapiv1.NamespacesFromAll
 	for i := range gw.Spec.Listeners {
 		listener := &gw.Spec.Listeners[i]
 
-		if listener.Protocol == gwapiv1.HTTPSProtocolType || listener.Protocol == gwapiv1.HTTPProtocolType {
-			// Initialize AllowedRoutes if needed
-			if listener.AllowedRoutes == nil {
-				listener.AllowedRoutes = &gwapiv1.AllowedRoutes{}
-			}
+		// Ensure AllowedRoutes is set to allow from all namespaces
+		needsUpdate := listener.AllowedRoutes == nil ||
+			listener.AllowedRoutes.Namespaces == nil ||
+			listener.AllowedRoutes.Namespaces.From == nil ||
+			*listener.AllowedRoutes.Namespaces.From != fromAll
 
-			// Allow HTTPRoute kind
-			httpRouteKind := gwapiv1.Kind("HTTPRoute")
-			listener.AllowedRoutes.Kinds = []gwapiv1.RouteGroupKind{
-				{
-					Group: (*gwapiv1.Group)(stringPtr("gateway.networking.k8s.io")),
-					Kind:  httpRouteKind,
+		if needsUpdate {
+			listener.AllowedRoutes = &gwapiv1.AllowedRoutes{
+				Namespaces: &gwapiv1.RouteNamespaces{
+					From: &fromAll,
 				},
 			}
-
-			// Allow from namespaces with the gateway access label
-			fromNamespaces := gwapiv1.NamespacesFromSelector
-			listener.AllowedRoutes.Namespaces = &gwapiv1.RouteNamespaces{
-				From: &fromNamespaces,
-				Selector: &metav1.LabelSelector{
-					MatchLabels: map[string]string{
-						LabelGatewayAccess: gw.Name,
-					},
-				},
-			}
-
 			updated = true
 		}
 	}
@@ -245,7 +232,7 @@ func (r *GatewayHostnameRequestReconciler) ensureAllowedRoutes(ctx context.Conte
 		if err := r.Update(ctx, &gw); err != nil {
 			return fmt.Errorf("failed to update gateway allowedRoutes: %w", err)
 		}
-		logger.Info("Updated Gateway allowedRoutes", "gateway", gw.Name, "namespace", ghr.Namespace)
+		logger.Info("Updated Gateway allowedRoutes to allow all namespaces", "gateway", gw.Name)
 	}
 
 	return nil
@@ -320,10 +307,6 @@ func (r *GatewayHostnameRequestReconciler) ensureRoute53Alias(ctx context.Contex
 		"zoneId", ghr.Spec.ZoneId)
 
 	return nil
-}
-
-func stringPtr(s string) *string {
-	return &s
 }
 
 // ensureNamespaceLabel labels the requesting namespace to allow HTTPRoute creation for the assigned Gateway
