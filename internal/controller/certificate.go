@@ -3,11 +3,23 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	gatewayv1alpha1 "github.com/michelfeldheim/gateway-orchestrator/api/v1alpha1"
 	"github.com/michelfeldheim/gateway-orchestrator/internal/aws"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+const (
+	// AWSCallTimeout is the default timeout for AWS API calls
+	AWSCallTimeout = 30 * time.Second
+)
+
+// withAWSTimeout returns a context with the standard AWS call timeout.
+// Always call cancel() after the AWS call completes to release resources.
+func withAWSTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, AWSCallTimeout)
+}
 
 // requestCertificate requests a new ACM certificate for the hostname
 func (r *GatewayHostnameRequestReconciler) requestCertificate(ctx context.Context, ghr *gatewayv1alpha1.GatewayHostnameRequest) (string, error) {
@@ -18,7 +30,10 @@ func (r *GatewayHostnameRequestReconciler) requestCertificate(ctx context.Contex
 		"environment": ghr.Spec.Environment,
 	}
 
-	certArn, err := r.ACMClient.RequestCertificate(ctx, ghr.Spec.Hostname, tags)
+	awsCtx, cancel := withAWSTimeout(ctx)
+	defer cancel()
+
+	certArn, err := r.ACMClient.RequestCertificate(awsCtx, ghr.Spec.Hostname, tags)
 	if err != nil {
 		return "", fmt.Errorf("failed to request certificate: %w", err)
 	}
@@ -33,13 +48,19 @@ func (r *GatewayHostnameRequestReconciler) ensureValidationRecords(ctx context.C
 		return fmt.Errorf("certificate ARN not set")
 	}
 
+	awsCtx, cancel := withAWSTimeout(ctx)
+	defer cancel()
+
 	// Get validation records from ACM
-	validationRecords, err := r.ACMClient.GetValidationRecords(ctx, ghr.Status.CertificateArn)
+	validationRecords, err := r.ACMClient.GetValidationRecords(awsCtx, ghr.Status.CertificateArn)
 	if err != nil {
 		return fmt.Errorf("failed to get validation records: %w", err)
 	}
 
-	logger.Info("Retrieved validation records from ACM", "count", len(validationRecords), "certificateArn", ghr.Status.CertificateArn)
+	logger.Info("Retrieved validation records from ACM", 
+		"count", len(validationRecords), 
+		"certificateArn", ghr.Status.CertificateArn,
+		"hostname", ghr.Spec.Hostname)
 
 	// Create each validation record in Route53
 	for _, valRec := range validationRecords {
@@ -50,15 +71,26 @@ func (r *GatewayHostnameRequestReconciler) ensureValidationRecords(ctx context.C
 			TTL:   300,
 		}
 
-		logger.Info("Creating validation record in Route53", "name", record.Name, "type", record.Type, "value", record.Value, "zoneId", ghr.Spec.ZoneId)
-
-		if err := r.Route53Client.CreateOrUpdateRecord(ctx, ghr.Spec.ZoneId, record); err != nil {
-			logger.Error(err, "Failed to create validation record", "name", record.Name, "zoneId", ghr.Spec.ZoneId)
+		recordCtx, recordCancel := withAWSTimeout(ctx)
+		err := r.Route53Client.CreateOrUpdateRecord(recordCtx, ghr.Spec.ZoneId, record)
+		recordCancel()
+		if err != nil {
+			logger.Error(err, "Failed to create validation record", 
+				"name", record.Name, 
+				"zoneId", ghr.Spec.ZoneId,
+				"hostname", ghr.Spec.Hostname)
 			return fmt.Errorf("failed to create validation record: %w", err)
 		}
+
+		logger.Info("Created validation record in Route53", 
+			"name", record.Name, 
+			"type", record.Type,
+			"zoneId", ghr.Spec.ZoneId)
 	}
 
-	logger.Info("All validation records created successfully", "count", len(validationRecords))
+	logger.Info("All validation records created successfully", 
+		"count", len(validationRecords),
+		"hostname", ghr.Spec.Hostname)
 	return nil
 }
 
@@ -68,7 +100,10 @@ func (r *GatewayHostnameRequestReconciler) checkCertificateStatus(ctx context.Co
 		return false, fmt.Errorf("certificate ARN not set")
 	}
 
-	certDetails, err := r.ACMClient.DescribeCertificate(ctx, ghr.Status.CertificateArn)
+	awsCtx, cancel := withAWSTimeout(ctx)
+	defer cancel()
+
+	certDetails, err := r.ACMClient.DescribeCertificate(awsCtx, ghr.Status.CertificateArn)
 	if err != nil {
 		return false, fmt.Errorf("failed to describe certificate: %w", err)
 	}

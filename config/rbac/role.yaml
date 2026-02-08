@@ -49,6 +49,7 @@ rules:
   - gatewayclasses
   verbs:
   - create
+  - delete
   - get
   - list
   - patch
