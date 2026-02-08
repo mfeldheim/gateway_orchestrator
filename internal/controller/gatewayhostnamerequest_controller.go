@@ -175,10 +175,12 @@ func (r *GatewayHostnameRequestReconciler) reconcileNormal(ctx context.Context, 
 		if err != nil {
 			r.setCondition(ghr, ConditionTypeCertificateRequested, metav1.ConditionFalse, "RequestFailed", err.Error())
 			_ = r.Status().Update(ctx, ghr)
+			r.Recorder.Eventf(ghr, corev1.EventTypeWarning, "CertificateRequestFailed", "Failed to request certificate: %v", err)
 			return ctrl.Result{}, err
 		}
 		ghr.Status.CertificateArn = certArn
 		r.setCondition(ghr, ConditionTypeCertificateRequested, metav1.ConditionTrue, "Requested", "Certificate requested from ACM")
+		r.Recorder.Eventf(ghr, corev1.EventTypeNormal, "CertificateRequested", "ACM certificate request submitted (%s)", certArn)
 		if err := r.Status().Update(ctx, ghr); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -194,9 +196,11 @@ func (r *GatewayHostnameRequestReconciler) reconcileNormal(ctx context.Context, 
 			}
 			r.setCondition(ghr, ConditionTypeDnsValidated, metav1.ConditionFalse, "ValidationRecordFailed", err.Error())
 			_ = r.Status().Update(ctx, ghr)
+			r.Recorder.Eventf(ghr, corev1.EventTypeWarning, "DnsValidationFailed", "Failed to create DNS validation records: %v", err)
 			return ctrl.Result{}, err
 		}
 		r.setCondition(ghr, ConditionTypeDnsValidated, metav1.ConditionTrue, "RecordsCreated", "DNS validation records created")
+		r.Recorder.Event(ghr, corev1.EventTypeNormal, "DnsValidationRecordsCreated", "DNS validation records created in Route53")
 		if err := r.Status().Update(ctx, ghr); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -245,13 +249,16 @@ func (r *GatewayHostnameRequestReconciler) reconcileNormal(ctx context.Context, 
 			// If LoadBalancer not ready yet, requeue
 			if err.Error() == "gateway "+ghr.Status.AssignedGateway+" does not have LoadBalancer address yet" {
 				logger.Info("Waiting for LoadBalancer to be provisioned", "gateway", ghr.Status.AssignedGateway)
+				r.Recorder.Eventf(ghr, corev1.EventTypeNormal, "WaitingForLoadBalancer", "Waiting for ALB provisioning (gateway: %s)", ghr.Status.AssignedGateway)
 				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 			}
 			r.setCondition(ghr, ConditionTypeDnsAliasReady, metav1.ConditionFalse, "AliasFailed", err.Error())
 			_ = r.Status().Update(ctx, ghr)
+			r.Recorder.Eventf(ghr, corev1.EventTypeWarning, "DnsAliasFailed", "Failed to create Route53 ALIAS record: %v", err)
 			return ctrl.Result{}, err
 		}
 		r.setCondition(ghr, ConditionTypeDnsAliasReady, metav1.ConditionTrue, "Created", "Route53 ALIAS record created")
+		r.Recorder.Eventf(ghr, corev1.EventTypeNormal, "DnsAliasReady", "Route53 ALIAS record created pointing to %s", ghr.Status.AssignedLoadBalancer)
 		if err := r.Status().Update(ctx, ghr); err != nil {
 			return ctrl.Result{}, err
 		}
