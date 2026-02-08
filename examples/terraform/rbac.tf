@@ -76,13 +76,6 @@ resource "kubernetes_cluster_role" "gateway_orchestrator" {
     verbs      = ["get", "list", "watch", "create", "update", "patch", "delete"]
   }
 
-  # AWS Application Networking CRDs
-  rule {
-    api_groups = ["application-networking.k8s.aws"]
-    resources  = ["healthcheckpolicies"]
-    verbs      = ["get", "list", "watch", "create", "update", "patch", "delete"]
-  }
-
   # Services for Gateway status inspection
   rule {
     api_groups = [""]
