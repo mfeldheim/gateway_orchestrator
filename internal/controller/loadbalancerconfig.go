@@ -78,6 +78,9 @@ func (r *GatewayHostnameRequestReconciler) ensureLoadBalancerConfiguration(
 	spec := map[string]interface{}{
 		"scheme":                 visibility,
 		"listenerConfigurations": listenerConfigs,
+		"targetGroupConfiguration": map[string]interface{}{
+			"targetType": "ip",
+		},
 	}
 
 	// Add WAF if specified

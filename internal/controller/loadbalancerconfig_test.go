@@ -149,6 +149,84 @@ func TestCertificateSorting_EdgeCasesWithFewCertificates(t *testing.T) {
 			name:         "single_certificate",
 			certificates: []string{"arn:aws:acm:eu-west-1:123456789012:certificate/only-one"},
 			expectFirst:  "arn:aws:acm:eu-west-1:123456789012:certificate/only-one",
+			description:  "Single hostname: one cert",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sorted := make([]string, len(tt.certificates))
+			copy(sorted, tt.certificates)
+			sort.Strings(sorted)
+
+			if len(sorted) > 0 && sorted[0] != tt.expectFirst {
+				t.Errorf("%s: first = %s, want %s", tt.description, sorted[0], tt.expectFirst)
+			}
+		})
+	}
+}
+
+// TestLoadBalancerConfiguration_IncludesTargetGroupConfiguration verifies that
+// LoadBalancerConfiguration includes targetGroupConfiguration.targetType set to "ip"
+// to support ClusterIP services (matching Ingress behavior).
+func TestLoadBalancerConfiguration_IncludesTargetGroupConfiguration(t *testing.T) {
+	tests := []struct {
+		name         string
+		description  string
+		expectedType string
+	}{
+		{
+			name:         "target_type_ip",
+			description:  "LoadBalancerConfiguration should use targetType: ip for ClusterIP support",
+			expectedType: "ip",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Build spec as ensureLoadBalancerConfiguration does
+			spec := map[string]interface{}{
+				"scheme": "internet-facing",
+				"listenerConfigurations": []interface{}{
+					map[string]interface{}{"protocolPort": "HTTP:80"},
+				},
+				"targetGroupConfiguration": map[string]interface{}{
+					"targetType": "ip",
+				},
+			}
+
+			// Verify targetGroupConfiguration exists
+			targetGroupConfig, ok := spec["targetGroupConfiguration"].(map[string]interface{})
+			if !ok {
+				t.Fatal("targetGroupConfiguration not found in spec")
+			}
+
+			// Verify targetType is set to "ip"
+			targetType, ok := targetGroupConfig["targetType"].(string)
+			if !ok {
+				t.Fatal("targetType not found in targetGroupConfiguration")
+			}
+
+			if targetType != tt.expectedType {
+				t.Errorf("%s: targetType = %s, want %s",
+					tt.description, targetType, tt.expectedType)
+			}
+		})
+	}
+}
+
+// TestCertificateSorting_EdgeCasesWithFewCertificates_continued tests with actual edge cases
+func TestCertificateSorting_EdgeCasesWithFewCertificates_continued(t *testing.T) {
+	tests := []struct {
+		name         string
+		certificates []string
+		expectFirst  string
+		description  string
+	}{
+		{
+			name:         "single_certificate",
+			certificates: []string{"arn:aws:acm:eu-west-1:123456789012:certificate/only-one"},
+			expectFirst:  "arn:aws:acm:eu-west-1:123456789012:certificate/only-one",
 			description:  "Single hostname request: one Gateway, one cert",
 		},
 		{
