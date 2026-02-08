@@ -380,15 +380,24 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 		logger.Error(err, "Failed to delete domain claim")
 	}
 
-	// Step 7: Clean up Gateway if it's now empty (no other GHRs assigned)
-	if ghr.Status.AssignedGateway != "" && ghr.Status.AssignedGatewayNamespace != "" {
-		if err := r.cleanupEmptyGateway(ctx, ghr.Status.AssignedGateway, ghr.Status.AssignedGatewayNamespace); err != nil {
-			logger.Error(err, "Failed to cleanup empty gateway", "gateway", ghr.Status.AssignedGateway)
-			// Continue anyway - don't fail deletion just because gateway cleanup failed
+	// Step 7: Clear Gateway assignment before cleanup to avoid race condition
+	// (the current GHR would count itself in the assignment count)
+	gatewayName := ghr.Status.AssignedGateway
+	gatewayNamespace := ghr.Status.AssignedGatewayNamespace
+	ghr.Status.AssignedGateway = ""
+	ghr.Status.AssignedGatewayNamespace = ""
+
+	// Step 8: Clean up Gateway if it's now empty (no other GHRs assigned)
+	if gatewayName != "" && gatewayNamespace != "" {
+		if err := r.cleanupEmptyGateway(ctx, gatewayName, gatewayNamespace); err != nil {
+			logger.Error(err, "Failed to cleanup empty gateway", "gateway", gatewayName)
+			// Gateway cleanup failure should block deletion - requeue to retry
+			_ = r.Status().Update(ctx, ghr) // best-effort to persist the cleared status
+			return ctrl.Result{}, err
 		}
 	}
 
-	// Step 8: Remove finalizer
+	// Step 9: Remove finalizer
 	controllerutil.RemoveFinalizer(ghr, FinalizerName)
 	if err := r.Update(ctx, ghr); err != nil {
 		return ctrl.Result{}, err

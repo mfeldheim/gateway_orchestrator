@@ -56,7 +56,7 @@ func TestCleanupEmptyGateway_WithAssignments_DoesNotDelete(t *testing.T) {
 }
 
 func TestCleanupEmptyGateway_NoAssignments_DeletesGateway(t *testing.T) {
-	// Setup
+	// Setup - no GHRs with assignments
 	scheme := getTestScheme()
 	gateway := &gwapiv1.Gateway{
 		ObjectMeta: metav1.ObjectMeta{
@@ -85,6 +85,46 @@ func TestCleanupEmptyGateway_NoAssignments_DeletesGateway(t *testing.T) {
 	err = client.Get(context.Background(), types.NamespacedName{Name: "gw-01", Namespace: "edge"}, &deletedGateway)
 	// Should return "not found" error after deletion
 	assert.Error(t, err)
+}
+
+func TestCleanupEmptyGateway_RaceCondition_IgnoresOtherNamespaceAssignments(t *testing.T) {
+	// Setup - GHR in different namespace assigned to different gw doesn't affect gw-01 cleanup
+	scheme := getTestScheme()
+	ghrOtherNamespace := &gatewayv1alpha1.GatewayHostnameRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ghr-other",
+			Namespace: "other-ns",
+		},
+		Status: gatewayv1alpha1.GatewayHostnameRequestStatus{
+			AssignedGateway:          "gw-01", // same gateway name, different namespace
+			AssignedGatewayNamespace: "other-edge", // different namespace
+		},
+	}
+
+	gateway := &gwapiv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "gw-01",
+			Namespace: "edge",
+		},
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(ghrOtherNamespace, gateway).
+		Build()
+
+	reconciler := &GatewayHostnameRequestReconciler{
+		Client: client,
+	}
+
+	// Execute cleanup for gw-01 in "edge" namespace (not "other-edge")
+	err := reconciler.cleanupEmptyGateway(context.Background(), "gw-01", "edge")
+
+	// Assert - should delete because the assignment is in different namespace
+	assert.NoError(t, err)
+	var deletedGateway gwapiv1.Gateway
+	err = client.Get(context.Background(), types.NamespacedName{Name: "gw-01", Namespace: "edge"}, &deletedGateway)
+	assert.Error(t, err) // Gateway should be deleted
 }
 
 func TestCleanupEmptyGateway_MultipleGHRs_DeletesOnlyWhenAllRemoved(t *testing.T) {
