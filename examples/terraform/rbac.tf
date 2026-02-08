@@ -52,7 +52,7 @@ resource "kubernetes_cluster_role" "gateway_orchestrator" {
   rule {
     api_groups = ["gateway.networking.k8s.io"]
     resources  = ["gateways", "gatewayclasses"]
-    verbs      = ["get", "list", "watch", "create", "update", "patch"]
+    verbs      = ["get", "list", "watch", "create", "update", "patch", "delete"]
   }
 
   # Gateway API status subresources
@@ -67,6 +67,13 @@ resource "kubernetes_cluster_role" "gateway_orchestrator" {
     api_groups = [""]
     resources  = ["events"]
     verbs      = ["create", "patch"]
+  }
+
+  # AWS Load Balancer Controller configuration CRDs
+  rule {
+    api_groups = ["gateway.k8s.aws"]
+    resources  = ["loadbalancerconfigurations"]
+    verbs      = ["get", "list", "watch", "create", "update", "patch", "delete"]
   }
 
   # Services for Gateway status inspection
