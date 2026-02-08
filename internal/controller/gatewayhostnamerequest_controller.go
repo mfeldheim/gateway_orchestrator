@@ -4,12 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	goerrors "errors"
+	"errors"
 	"fmt"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -187,10 +187,10 @@ func (r *GatewayHostnameRequestReconciler) reconcileNormal(ctx context.Context, 
 	// Step 4: Ensure DNS validation records
 	if !meta.IsStatusConditionTrue(ghr.Status.Conditions, ConditionTypeDnsValidated) {
 		if err := r.ensureValidationRecords(ctx, ghr); err != nil {
-			if goerrors.Is(err, ErrValidationRecordsNotReady) {
+			if errors.Is(err, ErrValidationRecordsNotReady) {
 				r.setCondition(ghr, ConditionTypeDnsValidated, metav1.ConditionFalse, "PendingValidationRecords", "Waiting for ACM to provide DNS validation records")
 				_ = r.Status().Update(ctx, ghr)
-				return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 			}
 			r.setCondition(ghr, ConditionTypeDnsValidated, metav1.ConditionFalse, "ValidationRecordFailed", err.Error())
 			_ = r.Status().Update(ctx, ghr)
@@ -666,7 +666,7 @@ func (r *GatewayHostnameRequestReconciler) validateAssignedResources(ctx context
 			Namespace: ghr.Status.AssignedGatewayNamespace,
 		}, &gw)
 		if err != nil {
-			if errors.IsNotFound(err) {
+			if apierrors.IsNotFound(err) {
 				logger.Info("Drift detected: Gateway no longer exists", "gateway", ghr.Status.AssignedGateway)
 				r.Recorder.Eventf(ghr, corev1.EventTypeWarning, "DriftDetected", "Gateway %s no longer exists", ghr.Status.AssignedGateway)
 				// Clear conditions to trigger reassignment
@@ -687,7 +687,7 @@ func (r *GatewayHostnameRequestReconciler) validateAssignedResources(ctx context
 				Name:      lbcName,
 				Namespace: ghr.Status.AssignedGatewayNamespace,
 			}, lbc)
-			if err != nil && errors.IsNotFound(err) {
+			if err != nil && apierrors.IsNotFound(err) {
 				logger.Info("Drift detected: LoadBalancerConfiguration no longer exists", "name", lbcName)
 				r.Recorder.Eventf(ghr, corev1.EventTypeWarning, "DriftDetected", "LoadBalancerConfiguration %s no longer exists", lbcName)
 				// Clear condition to trigger recreation
