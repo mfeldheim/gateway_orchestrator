@@ -380,7 +380,15 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 		logger.Error(err, "Failed to delete domain claim")
 	}
 
-	// Step 7: Remove finalizer
+	// Step 7: Clean up Gateway if it's now empty (no other GHRs assigned)
+	if ghr.Status.AssignedGateway != "" && ghr.Status.AssignedGatewayNamespace != "" {
+		if err := r.cleanupEmptyGateway(ctx, ghr.Status.AssignedGateway, ghr.Status.AssignedGatewayNamespace); err != nil {
+			logger.Error(err, "Failed to cleanup empty gateway", "gateway", ghr.Status.AssignedGateway)
+			// Continue anyway - don't fail deletion just because gateway cleanup failed
+		}
+	}
+
+	// Step 8: Remove finalizer
 	controllerutil.RemoveFinalizer(ghr, FinalizerName)
 	if err := r.Update(ctx, ghr); err != nil {
 		return ctrl.Result{}, err
@@ -388,6 +396,7 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 
 	logger.Info("Successfully deleted GatewayHostnameRequest", "hostname", ghr.Spec.Hostname)
 	return ctrl.Result{}, nil
+
 }
 
 // isCertificateInUse checks if the ACM certificate is still referenced by any resource (e.g., ALB listener)
