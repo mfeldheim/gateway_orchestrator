@@ -63,7 +63,12 @@ func (r *GatewayHostnameRequestReconciler) ensureLoadBalancerConfiguration(
 		}
 		if len(sortedCerts) > 1 {
 			// Additional certs for SNI
-			httpsListener["certificates"] = sortedCerts[1:]
+			// Convert []string to []interface{} for unstructured object compatibility
+			additionalCerts := make([]interface{}, len(sortedCerts)-1)
+			for i, cert := range sortedCerts[1:] {
+				additionalCerts[i] = cert
+			}
+			httpsListener["certificates"] = additionalCerts
 		}
 		listenerConfigs = append(listenerConfigs, httpsListener)
 	}
@@ -78,6 +83,9 @@ func (r *GatewayHostnameRequestReconciler) ensureLoadBalancerConfiguration(
 	spec := map[string]interface{}{
 		"scheme":                 visibility,
 		"listenerConfigurations": listenerConfigs,
+		"targetGroupConfiguration": map[string]interface{}{
+			"targetType": "ip",
+		},
 	}
 
 	// Add WAF if specified
