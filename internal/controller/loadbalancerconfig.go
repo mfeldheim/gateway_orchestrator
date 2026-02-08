@@ -200,6 +200,11 @@ func (r *GatewayHostnameRequestReconciler) ensureTargetGroupConfiguration(ctx co
 	}
 
 	spec := map[string]interface{}{
+		"targetReference": map[string]interface{}{
+			"group": "gateway.networking.k8s.io",
+			"kind":  "Gateway",
+			"name":  gatewayName,
+		},
 		"defaultConfiguration": map[string]interface{}{
 			"targetType": "ip",
 		},
@@ -221,7 +226,12 @@ func (r *GatewayHostnameRequestReconciler) ensureTargetGroupConfiguration(ctx co
 		// Update existing if needed
 		existingSpec, _ := existing.Object["spec"].(map[string]interface{})
 		existingDefault, _ := existingSpec["defaultConfiguration"].(map[string]interface{})
-		if existingDefault["targetType"] != "ip" {
+		existingRef, _ := existingSpec["targetReference"].(map[string]interface{})
+		needsUpdate := existingDefault["targetType"] != "ip" ||
+			existingRef["name"] != gatewayName ||
+			existingRef["kind"] != "Gateway" ||
+			existingRef["group"] != "gateway.networking.k8s.io"
+		if needsUpdate {
 			existing.Object["spec"] = spec
 			if err := r.Update(ctx, existing); err != nil {
 				return fmt.Errorf("failed to update TargetGroupConfiguration %s: %w", configName, err)

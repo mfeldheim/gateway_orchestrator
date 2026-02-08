@@ -102,6 +102,21 @@ func TestEnsureTargetGroupConfiguration_CreatesWithTargetTypeIP(t *testing.T) {
 	if targetType != "ip" {
 		t.Errorf("targetType = %q, want %q", targetType, "ip")
 	}
+
+	// Verify targetReference points to the Gateway
+	targetRef, ok := spec["targetReference"].(map[string]interface{})
+	if !ok {
+		t.Fatal("targetReference not found in spec")
+	}
+	if targetRef["name"] != "gw-01" {
+		t.Errorf("targetReference.name = %q, want %q", targetRef["name"], "gw-01")
+	}
+	if targetRef["group"] != "gateway.networking.k8s.io" {
+		t.Errorf("targetReference.group = %q, want %q", targetRef["group"], "gateway.networking.k8s.io")
+	}
+	if targetRef["kind"] != "Gateway" {
+		t.Errorf("targetReference.kind = %q, want %q", targetRef["kind"], "Gateway")
+	}
 }
 
 // TestEnsureTargetGroupConfiguration_IdempotentWhenAlreadyCorrect verifies that
