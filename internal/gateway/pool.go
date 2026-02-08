@@ -165,7 +165,6 @@ func (p *Pool) getGatewayInfo(gw *gwapiv1.Gateway) *GatewayInfo {
 func (p *Pool) CreateGateway(ctx context.Context, visibility string, wafArn string, index int) (*GatewayInfo, error) {
 	name := fmt.Sprintf("gw-%02d", index)
 	configName := fmt.Sprintf("%s-config", name)
-	tgConfigName := fmt.Sprintf("%s-tgconfig", name)
 
 	gw := &gwapiv1.Gateway{}
 	gw.Name = name
@@ -175,7 +174,6 @@ func (p *Pool) CreateGateway(ctx context.Context, visibility string, wafArn stri
 		"gateway.opendi.com/certificate-count":         "0",
 		"gateway.opendi.com/rule-count":                "0",
 		"gateway.k8s.aws/loadbalancer-configuration":   configName,
-		"gateway.k8s.aws/targetgroupconfiguration":     tgConfigName,
 		"gateway.opendi.com/waf-arn":                   wafArn,
 	}
 	gw.Spec.GatewayClassName = gwapiv1.ObjectName(p.gatewayClass)

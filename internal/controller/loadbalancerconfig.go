@@ -21,13 +21,6 @@ var LoadBalancerConfigurationGVK = schema.GroupVersionKind{
 	Kind:    "LoadBalancerConfiguration",
 }
 
-// TargetGroupConfigurationGVK is the GVK for AWS TargetGroupConfiguration
-var TargetGroupConfigurationGVK = schema.GroupVersionKind{
-	Group:   "gateway.k8s.aws",
-	Version: "v1beta1",
-	Kind:    "TargetGroupConfiguration",
-}
-
 // ensureLoadBalancerConfiguration creates or updates the LoadBalancerConfiguration for a Gateway
 // with all certificate ARNs from GatewayHostnameRequests assigned to that Gateway
 // wafArn can be empty (no WAF) or a WAF ARN to associate with the load balancer
@@ -179,88 +172,5 @@ func (r *GatewayHostnameRequestReconciler) deleteLoadBalancerConfiguration(ctx c
 		logger.Info("Deleted LoadBalancerConfiguration", "name", configName)
 	}
 
-	// Also delete the TargetGroupConfiguration
-	_ = r.deleteTargetGroupConfiguration(ctx, gatewayName, gatewayNamespace)
-
-	return nil
-}
-
-// ensureTargetGroupConfiguration creates or updates the TargetGroupConfiguration for a Gateway
-// to use IP-based target groups, enabling ClusterIP services (default K8s service type).
-func (r *GatewayHostnameRequestReconciler) ensureTargetGroupConfiguration(ctx context.Context, gatewayName, gatewayNamespace string) error {
-	logger := log.FromContext(ctx)
-
-	configName := fmt.Sprintf("%s-tgconfig", gatewayName)
-
-	existing := &unstructured.Unstructured{}
-	existing.SetGroupVersionKind(TargetGroupConfigurationGVK)
-	err := r.Get(ctx, types.NamespacedName{Name: configName, Namespace: gatewayNamespace}, existing)
-	if err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("failed to get TargetGroupConfiguration %s: %w", configName, err)
-	}
-
-	spec := map[string]interface{}{
-		"targetReference": map[string]interface{}{
-			"group": "gateway.networking.k8s.io",
-			"kind":  "Gateway",
-			"name":  gatewayName,
-		},
-		"defaultConfiguration": map[string]interface{}{
-			"targetType": "ip",
-		},
-	}
-
-	if apierrors.IsNotFound(err) {
-		// Create new TargetGroupConfiguration
-		tgConfig := &unstructured.Unstructured{}
-		tgConfig.SetGroupVersionKind(TargetGroupConfigurationGVK)
-		tgConfig.SetName(configName)
-		tgConfig.SetNamespace(gatewayNamespace)
-		tgConfig.Object["spec"] = spec
-
-		if err := r.Create(ctx, tgConfig); err != nil {
-			return fmt.Errorf("failed to create TargetGroupConfiguration %s: %w", configName, err)
-		}
-		logger.Info("Created TargetGroupConfiguration", "name", configName, "targetType", "ip")
-	} else {
-		// Update existing if needed
-		existingSpec, _ := existing.Object["spec"].(map[string]interface{})
-		existingDefault, _ := existingSpec["defaultConfiguration"].(map[string]interface{})
-		existingRef, _ := existingSpec["targetReference"].(map[string]interface{})
-		needsUpdate := existingDefault["targetType"] != "ip" ||
-			existingRef["name"] != gatewayName ||
-			existingRef["kind"] != "Gateway" ||
-			existingRef["group"] != "gateway.networking.k8s.io"
-		if needsUpdate {
-			existing.Object["spec"] = spec
-			if err := r.Update(ctx, existing); err != nil {
-				return fmt.Errorf("failed to update TargetGroupConfiguration %s: %w", configName, err)
-			}
-			logger.Info("Updated TargetGroupConfiguration", "name", configName, "targetType", "ip")
-		}
-	}
-
-	return nil
-}
-
-// deleteTargetGroupConfiguration removes the TargetGroupConfiguration for a Gateway
-func (r *GatewayHostnameRequestReconciler) deleteTargetGroupConfiguration(ctx context.Context, gatewayName, gatewayNamespace string) error {
-	logger := log.FromContext(ctx)
-	configName := fmt.Sprintf("%s-tgconfig", gatewayName)
-
-	config := &unstructured.Unstructured{}
-	config.SetGroupVersionKind(TargetGroupConfigurationGVK)
-	config.SetName(configName)
-	config.SetNamespace(gatewayNamespace)
-
-	if err := r.Delete(ctx, config); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return fmt.Errorf("failed to delete TargetGroupConfiguration %s: %w", configName, err)
-		}
-		// Already deleted, nothing to do
-		return nil
-	}
-
-	logger.Info("Deleted TargetGroupConfiguration", "name", configName)
 	return nil
 }

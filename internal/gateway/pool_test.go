@@ -491,12 +491,6 @@ func TestPool_CreateGateway_CustomPorts(t *testing.T) {
 			t.Errorf("unexpected listener name: %s", l.Name)
 		}
 	}
-
-	// Verify targetgroupconfiguration annotation is set
-	tgcAnnotation := gw.Annotations["gateway.k8s.aws/targetgroupconfiguration"]
-	if tgcAnnotation != "gw-01-tgconfig" {
-		t.Errorf("targetgroupconfiguration annotation = %q, want %q", tgcAnnotation, "gw-01-tgconfig")
-	}
 }
 
 func TestPool_NewPool_DefaultPorts(t *testing.T) {

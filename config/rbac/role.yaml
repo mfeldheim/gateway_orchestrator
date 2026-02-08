@@ -69,7 +69,6 @@ rules:
   - gateway.k8s.aws
   resources:
   - loadbalancerconfigurations
-  - targetgroupconfigurations
   verbs:
   - create
   - delete
