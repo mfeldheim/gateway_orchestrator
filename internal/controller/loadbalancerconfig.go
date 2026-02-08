@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -52,6 +53,10 @@ func (r *GatewayHostnameRequestReconciler) ensureLoadBalancerConfiguration(
 	existingConfig := &unstructured.Unstructured{}
 	existingConfig.SetGroupVersionKind(LoadBalancerConfigurationGVK)
 	err := r.Get(ctx, types.NamespacedName{Name: configName, Namespace: gatewayNamespace}, existingConfig)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("failed to get LoadBalancerConfiguration %s: %w", configName, err)
+	}
+	notFound := apierrors.IsNotFound(err)
 
 	// Build listener configuration with certificates
 	listenerConfigs := []interface{}{}
@@ -95,11 +100,11 @@ func (r *GatewayHostnameRequestReconciler) ensureLoadBalancerConfiguration(
 	// Add WAF if specified
 	if wafArn != "" {
 		spec["wafV2"] = map[string]interface{}{
-			"arnOrName": wafArn,
+			"webACL": wafArn,
 		}
 	}
 
-	if err != nil {
+	if notFound {
 		// Create new config
 		lbConfig.Object["spec"] = spec
 
@@ -166,11 +171,13 @@ func (r *GatewayHostnameRequestReconciler) deleteLoadBalancerConfiguration(ctx c
 	config.SetNamespace(gatewayNamespace)
 
 	if err := r.Delete(ctx, config); err != nil {
-		// Ignore not found
-		return nil
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete LoadBalancerConfiguration %s: %w", configName, err)
+		}
+		// Already deleted, nothing to do
+	} else {
+		logger.Info("Deleted LoadBalancerConfiguration", "name", configName)
 	}
-
-	logger.Info("Deleted LoadBalancerConfiguration", "name", configName)
 
 	// Also delete the TargetGroupConfiguration
 	_ = r.deleteTargetGroupConfiguration(ctx, gatewayName, gatewayNamespace)
@@ -188,6 +195,9 @@ func (r *GatewayHostnameRequestReconciler) ensureTargetGroupConfiguration(ctx co
 	existing := &unstructured.Unstructured{}
 	existing.SetGroupVersionKind(TargetGroupConfigurationGVK)
 	err := r.Get(ctx, types.NamespacedName{Name: configName, Namespace: gatewayNamespace}, existing)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("failed to get TargetGroupConfiguration %s: %w", configName, err)
+	}
 
 	spec := map[string]interface{}{
 		"defaultConfiguration": map[string]interface{}{
@@ -195,7 +205,7 @@ func (r *GatewayHostnameRequestReconciler) ensureTargetGroupConfiguration(ctx co
 		},
 	}
 
-	if err != nil {
+	if apierrors.IsNotFound(err) {
 		// Create new TargetGroupConfiguration
 		tgConfig := &unstructured.Unstructured{}
 		tgConfig.SetGroupVersionKind(TargetGroupConfigurationGVK)
@@ -234,6 +244,10 @@ func (r *GatewayHostnameRequestReconciler) deleteTargetGroupConfiguration(ctx co
 	config.SetNamespace(gatewayNamespace)
 
 	if err := r.Delete(ctx, config); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete TargetGroupConfiguration %s: %w", configName, err)
+		}
+		// Already deleted, nothing to do
 		return nil
 	}
 
