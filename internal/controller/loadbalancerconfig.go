@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -12,8 +13,8 @@ import (
 	gatewayv1alpha1 "github.com/michelfeldheim/gateway-orchestrator/api/v1alpha1"
 )
 
-// LoadBalancerConfiguration GVK
-var loadBalancerConfigGVK = schema.GroupVersionKind{
+// LoadBalancerConfigurationGVK is the GVK for AWS LoadBalancerConfiguration
+var LoadBalancerConfigurationGVK = schema.GroupVersionKind{
 	Group:   "gateway.k8s.aws",
 	Version: "v1beta1",
 	Kind:    "LoadBalancerConfiguration",
@@ -21,12 +22,14 @@ var loadBalancerConfigGVK = schema.GroupVersionKind{
 
 // ensureLoadBalancerConfiguration creates or updates the LoadBalancerConfiguration for a Gateway
 // with all certificate ARNs from GatewayHostnameRequests assigned to that Gateway
+// wafArn can be empty (no WAF) or a WAF ARN to associate with the load balancer
 func (r *GatewayHostnameRequestReconciler) ensureLoadBalancerConfiguration(
 	ctx context.Context,
 	gatewayName string,
 	gatewayNamespace string,
 	certificateARNs []string,
 	visibility string,
+	wafArn string,
 ) error {
 	logger := log.FromContext(ctx)
 
@@ -34,27 +37,33 @@ func (r *GatewayHostnameRequestReconciler) ensureLoadBalancerConfiguration(
 
 	// Build the LoadBalancerConfiguration
 	lbConfig := &unstructured.Unstructured{}
-	lbConfig.SetGroupVersionKind(loadBalancerConfigGVK)
+	lbConfig.SetGroupVersionKind(LoadBalancerConfigurationGVK)
 	lbConfig.SetName(configName)
 	lbConfig.SetNamespace(gatewayNamespace)
 
 	// Try to get existing config
 	existingConfig := &unstructured.Unstructured{}
-	existingConfig.SetGroupVersionKind(loadBalancerConfigGVK)
+	existingConfig.SetGroupVersionKind(LoadBalancerConfigurationGVK)
 	err := r.Get(ctx, types.NamespacedName{Name: configName, Namespace: gatewayNamespace}, existingConfig)
 
 	// Build listener configuration with certificates
 	listenerConfigs := []interface{}{}
 	
 	if len(certificateARNs) > 0 {
+		// Sort certificates for deterministic ordering (ensures same default cert on each reconcile)
+		// Make a copy to avoid mutating the input slice
+		sortedCerts := make([]string, len(certificateARNs))
+		copy(sortedCerts, certificateARNs)
+		sort.Strings(sortedCerts)
+		
 		// HTTPS listener with certificates
 		httpsListener := map[string]interface{}{
 			"protocolPort":       "HTTPS:443",
-			"defaultCertificate": certificateARNs[0], // First cert is default
+			"defaultCertificate": sortedCerts[0], // First cert is default (now deterministic)
 		}
-		if len(certificateARNs) > 1 {
+		if len(sortedCerts) > 1 {
 			// Additional certs for SNI
-			httpsListener["certificates"] = certificateARNs[1:]
+			httpsListener["certificates"] = sortedCerts[1:]
 		}
 		listenerConfigs = append(listenerConfigs, httpsListener)
 	}
@@ -69,6 +78,11 @@ func (r *GatewayHostnameRequestReconciler) ensureLoadBalancerConfiguration(
 	spec := map[string]interface{}{
 		"scheme":                 visibility,
 		"listenerConfigurations": listenerConfigs,
+	}
+
+	// Add WAF if specified
+	if wafArn != "" {
+		spec["wafArn"] = wafArn
 	}
 
 	if err != nil {
@@ -117,7 +131,7 @@ func (r *GatewayHostnameRequestReconciler) deleteLoadBalancerConfiguration(ctx c
 	configName := fmt.Sprintf("%s-config", gatewayName)
 
 	config := &unstructured.Unstructured{}
-	config.SetGroupVersionKind(loadBalancerConfigGVK)
+	config.SetGroupVersionKind(LoadBalancerConfigurationGVK)
 	config.SetName(configName)
 	config.SetNamespace(gatewayNamespace)
 

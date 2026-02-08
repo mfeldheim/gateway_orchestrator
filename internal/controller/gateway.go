@@ -49,7 +49,7 @@ func (r *GatewayHostnameRequestReconciler) ensureGatewayAssignment(ctx context.C
 		visibility = "internet-facing"
 	}
 
-	gwInfo, err := r.GatewayPool.SelectGateway(ctx, visibility, ghr.Spec.GatewaySelector)
+	gwInfo, err := r.GatewayPool.SelectGateway(ctx, visibility, ghr.Spec.WafArn, ghr.Spec.GatewaySelector)
 	if err != nil {
 		return fmt.Errorf("failed to select gateway: %w", err)
 	}
@@ -70,12 +70,12 @@ func (r *GatewayHostnameRequestReconciler) ensureGatewayAssignment(ctx context.C
 
 		// Create LoadBalancerConfiguration FIRST with the initial certificate
 		initialCerts := []string{ghr.Status.CertificateArn}
-		if err := r.ensureLoadBalancerConfiguration(ctx, gatewayName, gatewayNamespace, initialCerts, visibility); err != nil {
+		if err := r.ensureLoadBalancerConfiguration(ctx, gatewayName, gatewayNamespace, initialCerts, visibility, ghr.Spec.WafArn); err != nil {
 			return fmt.Errorf("failed to create LoadBalancerConfiguration: %w", err)
 		}
 
 		// Now create Gateway referencing the LoadBalancerConfiguration
-		gwInfo, err = r.GatewayPool.CreateGateway(ctx, visibility, index)
+		gwInfo, err = r.GatewayPool.CreateGateway(ctx, visibility, ghr.Spec.WafArn, index)
 		if err != nil {
 			return fmt.Errorf("failed to create new gateway: %w", err)
 		}
@@ -94,7 +94,7 @@ func (r *GatewayHostnameRequestReconciler) ensureGatewayAssignment(ctx context.C
 	ghr.Status.AssignedGatewayNamespace = gwInfo.Namespace
 
 	// Sync LoadBalancerConfiguration to add this certificate to existing Gateway
-	if err := r.syncLoadBalancerConfiguration(ctx, gwInfo.Name, gwInfo.Namespace, visibility, ghr.Status.CertificateArn); err != nil {
+	if err := r.syncLoadBalancerConfiguration(ctx, gwInfo.Name, gwInfo.Namespace, visibility, ghr.Spec.WafArn, ghr.Status.CertificateArn); err != nil {
 		return fmt.Errorf("failed to sync LoadBalancerConfiguration: %w", err)
 	}
 
@@ -104,7 +104,7 @@ func (r *GatewayHostnameRequestReconciler) ensureGatewayAssignment(ctx context.C
 
 // syncLoadBalancerConfiguration collects all certificate ARNs for a Gateway and updates its LoadBalancerConfiguration
 // If newCertARN is provided, it's included even if the GHR isn't assigned yet
-func (r *GatewayHostnameRequestReconciler) syncLoadBalancerConfiguration(ctx context.Context, gatewayName, gatewayNamespace, visibility, newCertARN string) error {
+func (r *GatewayHostnameRequestReconciler) syncLoadBalancerConfiguration(ctx context.Context, gatewayName, gatewayNamespace, visibility, wafArn, newCertARN string) error {
 	// Collect all certificate ARNs from GatewayHostnameRequests assigned to this Gateway
 	arns, err := r.getGatewayCertificateARNs(ctx, gatewayName, gatewayNamespace)
 	if err != nil {
@@ -126,7 +126,7 @@ func (r *GatewayHostnameRequestReconciler) syncLoadBalancerConfiguration(ctx con
 	}
 
 	// Create or update the LoadBalancerConfiguration
-	return r.ensureLoadBalancerConfiguration(ctx, gatewayName, gatewayNamespace, arns, visibility)
+	return r.ensureLoadBalancerConfiguration(ctx, gatewayName, gatewayNamespace, arns, visibility, wafArn)
 }
 
 // attachCertificateToGateway is now a no-op - certificates are managed via LoadBalancerConfiguration
@@ -161,10 +161,20 @@ func (r *GatewayHostnameRequestReconciler) removeCertificateFromGateway(ctx cont
 		visibility = "internet-facing"
 	}
 
+	wafArn := gw.Annotations["gateway.opendi.com/waf-arn"]
+
 	// Re-sync LoadBalancerConfiguration (this will exclude the deleted GHR's certificate)
-	if err := r.syncLoadBalancerConfiguration(ctx, ghr.Status.AssignedGateway, ghr.Status.AssignedGatewayNamespace, visibility, ""); err != nil {
+	if err := r.syncLoadBalancerConfiguration(ctx, ghr.Status.AssignedGateway, ghr.Status.AssignedGatewayNamespace, visibility, wafArn, ""); err != nil {
 		return fmt.Errorf("failed to sync LoadBalancerConfiguration after certificate removal: %w", err)
 	}
+
+	// NOTE: WAF Orphan Scenario
+	// If this is the last GHR deleted and it had a custom WAF, the Gateway's WAF annotation remains.
+	// The WAF is no longer in use but not cleared from the annotation. This is acceptable because:
+	// 1. The Gateway might be reused later for another WAF-protected hostname
+	// 2. Clearing it would require cross-cluster state tracking
+	// 3. The orphaned WAF annotation doesn't affect functionality (just unused metadata)
+	// If needed, operators can manually clear it via: kubectl annotate gateway gw-01 gateway.opendi.com/waf-arn=""
 
 	logger.Info("Removed certificate from Gateway",
 		"gateway", ghr.Status.AssignedGateway,

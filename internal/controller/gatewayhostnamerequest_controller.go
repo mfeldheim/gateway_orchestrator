@@ -134,6 +134,12 @@ func (r *GatewayHostnameRequestReconciler) reconcileNormal(ctx context.Context, 
 	// Validate assigned resources still exist (drift detection)
 	if err := r.validateAssignedResources(ctx, ghr); err != nil {
 		logger.Error(err, "Resource validation failed")
+		// Set condition so user knows validation had issues, but continue reconciliation
+		r.setCondition(ghr, "ResourceValidationError", metav1.ConditionTrue, "ValidationFailed",
+			fmt.Sprintf("Validation error (will auto-correct): %v", err))
+		if err := r.Status().Update(ctx, ghr); err != nil {
+			logger.Error(err, "Failed to update validation error condition")
+		}
 		// Continue with reconciliation anyway - resources will be recreated if needed
 	}
 
@@ -528,7 +534,7 @@ func (r *GatewayHostnameRequestReconciler) ensureGatewayConfiguration(ctx contex
 		visibility = "internet-facing"
 	}
 	
-	if err := r.syncLoadBalancerConfiguration(ctx, ghr.Status.AssignedGateway, ghr.Status.AssignedGatewayNamespace, visibility, ghr.Status.CertificateArn); err != nil {
+	if err := r.syncLoadBalancerConfiguration(ctx, ghr.Status.AssignedGateway, ghr.Status.AssignedGatewayNamespace, visibility, ghr.Spec.WafArn, ghr.Status.CertificateArn); err != nil {
 		logger.Info("Failed to sync LoadBalancerConfiguration", "error", err)
 		return err
 	}
@@ -557,6 +563,13 @@ func (r *GatewayHostnameRequestReconciler) ensureGatewayConfiguration(ctx contex
 	// Ensure visibility annotation matches spec
 	if gw.Annotations["gateway.opendi.com/visibility"] != visibility {
 		gw.Annotations["gateway.opendi.com/visibility"] = visibility
+		needsUpdate = true
+	}
+
+	// Ensure WAF annotation matches spec
+	wafArn := ghr.Spec.WafArn
+	if gw.Annotations["gateway.opendi.com/waf-arn"] != wafArn {
+		gw.Annotations["gateway.opendi.com/waf-arn"] = wafArn
 		needsUpdate = true
 	}
 
@@ -619,7 +632,7 @@ func (r *GatewayHostnameRequestReconciler) validateAssignedResources(ctx context
 
 	// Check if ACM certificate still exists
 	if ghr.Status.CertificateArn != "" && meta.IsStatusConditionTrue(ghr.Status.Conditions, ConditionTypeCertificateIssued) {
-		status, err := r.ACMClient.GetCertificateStatus(ctx, ghr.Status.CertificateArn)
+		certDetails, err := r.ACMClient.DescribeCertificate(ctx, ghr.Status.CertificateArn)
 		if err != nil {
 			logger.Info("Drift detected: ACM certificate no longer exists or is inaccessible", "arn", ghr.Status.CertificateArn, "error", err)
 			r.Recorder.Eventf(ghr, corev1.EventTypeWarning, "DriftDetected", "ACM certificate %s no longer exists", ghr.Status.CertificateArn)
@@ -631,9 +644,9 @@ func (r *GatewayHostnameRequestReconciler) validateAssignedResources(ctx context
 			meta.RemoveStatusCondition(&ghr.Status.Conditions, ConditionTypeReady)
 			ghr.Status.CertificateArn = ""
 			driftDetected = true
-		} else if status == "FAILED" || status == "REVOKED" {
-			logger.Info("Drift detected: ACM certificate in bad state", "arn", ghr.Status.CertificateArn, "status", status)
-			r.Recorder.Eventf(ghr, corev1.EventTypeWarning, "CertificateFailed", "ACM certificate is in %s state", status)
+		} else if certDetails.Status == "FAILED" || certDetails.Status == "REVOKED" {
+			logger.Info("Drift detected: ACM certificate in bad state", "arn", ghr.Status.CertificateArn, "status", certDetails.Status)
+			r.Recorder.Eventf(ghr, corev1.EventTypeWarning, "CertificateFailed", "ACM certificate is in %s state", certDetails.Status)
 			// Clear conditions to trigger recreation
 			meta.RemoveStatusCondition(&ghr.Status.Conditions, ConditionTypeCertificateIssued)
 			meta.RemoveStatusCondition(&ghr.Status.Conditions, ConditionTypeDnsValidated)

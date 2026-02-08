@@ -223,7 +223,7 @@ func TestPool_SelectGateway(t *testing.T) {
 			pool := NewPool(client, "edge", "aws-alb")
 			ctx := context.Background()
 
-			got, err := pool.SelectGateway(ctx, tt.visibility, tt.selector)
+			got, err := pool.SelectGateway(ctx, tt.visibility, "", tt.selector)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("SelectGateway() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -374,7 +374,7 @@ func TestPool_CreateGateway(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			info, err := pool.CreateGateway(ctx, tt.visibility, tt.index)
+				info, err := pool.CreateGateway(ctx, tt.visibility, "", tt.index)
 			if err != nil {
 				t.Fatalf("CreateGateway() error = %v", err)
 			}
