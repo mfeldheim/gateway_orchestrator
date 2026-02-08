@@ -51,7 +51,8 @@ type GatewayInfo struct {
 
 // SelectGateway chooses an appropriate Gateway from the pool using first-fit
 // If selector is specified, only Gateways matching the label selector will be considered
-func (p *Pool) SelectGateway(ctx context.Context, visibility string, selector *metav1.LabelSelector) (*GatewayInfo, error) {
+// wafArn can be empty (no WAF) or a specific WAF ARN - only Gateways with matching WAF config will be considered
+func (p *Pool) SelectGateway(ctx context.Context, visibility string, wafArn string, selector *metav1.LabelSelector) (*GatewayInfo, error) {
 	// List all Gateways in the namespace
 	var gatewayList gwapiv1.GatewayList
 	if err := p.client.List(ctx, &gatewayList, client.InNamespace(p.namespace)); err != nil {
@@ -80,6 +81,14 @@ func (p *Pool) SelectGateway(ctx context.Context, visibility string, selector *m
 			continue
 		}
 
+		// Check WAF requirement matches
+		gwWafArn := gw.Annotations["gateway.opendi.com/waf-arn"]
+		if wafArn != gwWafArn {
+			// WAF mismatch - skip this Gateway
+			// This ensures hostnames only go to Gateways with matching WAF config
+			continue
+		}
+
 		// Check label selector if specified
 		if labelSelector != nil && !labelSelector.Matches(labels.Set(gw.Labels)) {
 			continue
@@ -95,6 +104,10 @@ func (p *Pool) SelectGateway(ctx context.Context, visibility string, selector *m
 	}
 
 	// No Gateway with capacity found, need to create new one
+	// NOTE: Race condition possible between SelectGateway() returning nil and CreateGateway() being called.
+	// If multiple reconcilers hit this simultaneously, both might try to create the same Gateway index.
+	// Mitigation: GetNextGatewayIndex() lists all Gateways, so duplicate creates will fail with AlreadyExists.
+	// The losing reconciler will retry and find the newly-created Gateway on next cycle.
 	return nil, nil
 }
 
@@ -127,7 +140,8 @@ func (p *Pool) getGatewayInfo(gw *gwapiv1.Gateway) *GatewayInfo {
 
 // CreateGateway creates a new Gateway in the pool
 // Certificate management is handled via LoadBalancerConfiguration, not the Gateway itself
-func (p *Pool) CreateGateway(ctx context.Context, visibility string, index int) (*GatewayInfo, error) {
+// wafArn can be empty (no WAF) or a specific WAF ARN to configure on the Gateway
+func (p *Pool) CreateGateway(ctx context.Context, visibility string, wafArn string, index int) (*GatewayInfo, error) {
 	name := fmt.Sprintf("gw-%02d", index)
 	configName := fmt.Sprintf("%s-config", name)
 
@@ -135,10 +149,11 @@ func (p *Pool) CreateGateway(ctx context.Context, visibility string, index int) 
 	gw.Name = name
 	gw.Namespace = p.namespace
 	gw.Annotations = map[string]string{
-		"gateway.opendi.com/visibility":             visibility,
-		"gateway.opendi.com/certificate-count":     "0",
-		"gateway.opendi.com/rule-count":            "0",
+		"gateway.opendi.com/visibility":               visibility,
+		"gateway.opendi.com/certificate-count":        "0",
+		"gateway.opendi.com/rule-count":               "0",
 		"gateway.k8s.aws/loadbalancer-configuration": configName,
+		"gateway.opendi.com/waf-arn":                  wafArn,
 	}
 	gw.Spec.GatewayClassName = gwapiv1.ObjectName(p.gatewayClass)
 

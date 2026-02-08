@@ -36,6 +36,15 @@ type GatewayHostnameRequestSpec struct {
 	// If not specified, any Gateway with capacity and matching visibility will be used.
 	// +kubebuilder:validation:Optional
 	GatewaySelector *metav1.LabelSelector `json:"gatewaySelector,omitempty"`
+
+	// WafArn is the optional AWS WAFv2 WebACL ARN to associate with the load balancer.
+	// If specified, the hostname will only be assigned to a Gateway that either:
+	// - Already has this WAF ARN configured, or
+	// - Has no WAF configured (this request will set it)
+	// All hostnames on the same Gateway will share the same WAF (ALB constraint).
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Pattern=`^arn:aws:wafv2:[a-z0-9-]+:[0-9]+:.*$`
+	WafArn string `json:"wafArn,omitempty"`
 }
 
 // GatewayHostnameRequestStatus defines the observed state of GatewayHostnameRequest

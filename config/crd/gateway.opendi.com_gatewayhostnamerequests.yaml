@@ -128,6 +128,15 @@ spec:
                 - internet-facing
                 - internal
                 type: string
+              wafArn:
+                description: |-
+                  WafArn is the optional AWS WAFv2 WebACL ARN to associate with the load balancer.
+                  If specified, the hostname will only be assigned to a Gateway that either:
+                  - Already has this WAF ARN configured, or
+                  - Has no WAF configured (this request will set it)
+                  All hostnames on the same Gateway will share the same WAF (ALB constraint).
+                pattern: ^arn:aws:wafv2:[a-z0-9-]+:[0-9]+:.*$
+                type: string
               zoneId:
                 description: ZoneId is the Route53 hosted zone ID where DNS records
                   will be created

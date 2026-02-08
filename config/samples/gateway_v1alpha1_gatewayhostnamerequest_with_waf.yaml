@@ -1,0 +1,13 @@
+apiVersion: gateway.opendi.com/v1alpha1
+kind: GatewayHostnameRequest
+metadata:
+  name: example-with-waf
+  namespace: default
+spec:
+  hostname: secure.example.com
+  zoneId: Z1234567890ABC
+  environment: prod
+  visibility: internet-facing
+  # Optional: Associate this hostname with an AWS WAFv2 WebACL
+  # All hostnames on the same Gateway will share this WAF
+  wafArn: arn:aws:wafv2:us-east-1:123456789012:global/webacl/example-waf/a1b2c3d4-5678-90ab-cdef-EXAMPLE11111
