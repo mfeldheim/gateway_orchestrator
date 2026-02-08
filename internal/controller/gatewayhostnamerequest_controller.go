@@ -615,6 +615,12 @@ func (r *GatewayHostnameRequestReconciler) ensureGatewayConfiguration(ctx contex
 		return err
 	}
 
+	// Ensure TargetGroupConfiguration exists with targetType: ip for ClusterIP support
+	if err := r.ensureTargetGroupConfiguration(ctx, ghr.Status.AssignedGateway, ghr.Status.AssignedGatewayNamespace); err != nil {
+		logger.Info("Failed to sync TargetGroupConfiguration", "error", err)
+		return err
+	}
+
 	// Ensure Gateway has correct annotations
 	var gw gwapiv1.Gateway
 	if err := r.Get(ctx, types.NamespacedName{
@@ -633,6 +639,13 @@ func (r *GatewayHostnameRequestReconciler) ensureGatewayConfiguration(ctx contex
 	configName := fmt.Sprintf("%s-config", ghr.Status.AssignedGateway)
 	if gw.Annotations["gateway.k8s.aws/loadbalancer-configuration"] != configName {
 		gw.Annotations["gateway.k8s.aws/loadbalancer-configuration"] = configName
+		needsUpdate = true
+	}
+
+	// Ensure targetgroupconfiguration annotation
+	tgConfigName := fmt.Sprintf("%s-tgconfig", ghr.Status.AssignedGateway)
+	if gw.Annotations["gateway.k8s.aws/targetgroupconfiguration"] != tgConfigName {
+		gw.Annotations["gateway.k8s.aws/targetgroupconfiguration"] = tgConfigName
 		needsUpdate = true
 	}
 

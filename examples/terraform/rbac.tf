@@ -72,14 +72,7 @@ resource "kubernetes_cluster_role" "gateway_orchestrator" {
   # AWS Load Balancer Controller configuration CRDs
   rule {
     api_groups = ["gateway.k8s.aws"]
-    resources  = ["loadbalancerconfigurations"]
-    verbs      = ["get", "list", "watch", "create", "update", "patch", "delete"]
-  }
-
-  # AWS Application Networking CRDs
-  rule {
-    api_groups = ["application-networking.k8s.aws"]
-    resources  = ["healthcheckpolicies"]
+    resources  = ["loadbalancerconfigurations", "targetgroupconfigurations"]
     verbs      = ["get", "list", "watch", "create", "update", "patch", "delete"]
   }
 

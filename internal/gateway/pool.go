@@ -23,15 +23,36 @@ type Pool struct {
 	client       client.Client
 	namespace    string
 	gatewayClass string
+	httpPort     int32
+	httpsPort    int32
 }
 
 // NewPool creates a new Gateway pool manager
-func NewPool(c client.Client, namespace, gatewayClass string) *Pool {
+// httpPort and httpsPort configure the listener ports on created Gateways (0 defaults to 80/443)
+func NewPool(c client.Client, namespace, gatewayClass string, httpPort, httpsPort int32) *Pool {
+	if httpPort == 0 {
+		httpPort = 80
+	}
+	if httpsPort == 0 {
+		httpsPort = 443
+	}
 	return &Pool{
 		client:       c,
 		namespace:    namespace,
 		gatewayClass: gatewayClass,
+		httpPort:     httpPort,
+		httpsPort:    httpsPort,
 	}
+}
+
+// HTTPPort returns the configured HTTP listener port (default: 80)
+func (p *Pool) HTTPPort() int32 {
+	return p.httpPort
+}
+
+// HTTPSPort returns the configured HTTPS listener port (default: 443)
+func (p *Pool) HTTPSPort() int32 {
+	return p.httpsPort
 }
 
 // Namespace returns the namespace where Gateways are created
@@ -144,16 +165,18 @@ func (p *Pool) getGatewayInfo(gw *gwapiv1.Gateway) *GatewayInfo {
 func (p *Pool) CreateGateway(ctx context.Context, visibility string, wafArn string, index int) (*GatewayInfo, error) {
 	name := fmt.Sprintf("gw-%02d", index)
 	configName := fmt.Sprintf("%s-config", name)
+	tgConfigName := fmt.Sprintf("%s-tgconfig", name)
 
 	gw := &gwapiv1.Gateway{}
 	gw.Name = name
 	gw.Namespace = p.namespace
 	gw.Annotations = map[string]string{
-		"gateway.opendi.com/visibility":              visibility,
-		"gateway.opendi.com/certificate-count":       "0",
-		"gateway.opendi.com/rule-count":              "0",
-		"gateway.k8s.aws/loadbalancer-configuration": configName,
-		"gateway.opendi.com/waf-arn":                 wafArn,
+		"gateway.opendi.com/visibility":                visibility,
+		"gateway.opendi.com/certificate-count":         "0",
+		"gateway.opendi.com/rule-count":                "0",
+		"gateway.k8s.aws/loadbalancer-configuration":   configName,
+		"gateway.k8s.aws/targetgroupconfiguration":     tgConfigName,
+		"gateway.opendi.com/waf-arn":                   wafArn,
 	}
 	gw.Spec.GatewayClassName = gwapiv1.ObjectName(p.gatewayClass)
 
@@ -166,13 +189,13 @@ func (p *Pool) CreateGateway(ctx context.Context, visibility string, wafArn stri
 		},
 	}
 
-	// Configure listeners
+	// Configure listeners with configurable ports
 	// TLS options satisfy Gateway API validation; actual certs come from LoadBalancerConfiguration
 	gw.Spec.Listeners = []gwapiv1.Listener{
 		{
 			Name:     "https",
 			Protocol: gwapiv1.HTTPSProtocolType,
-			Port:     443,
+			Port:     gwapiv1.PortNumber(p.httpsPort),
 			TLS: &gwapiv1.ListenerTLSConfig{
 				Mode: ptrTo(gwapiv1.TLSModeTerminate),
 				// Use Options to satisfy Gateway API validation (requires certificateRefs OR options)
@@ -185,7 +208,7 @@ func (p *Pool) CreateGateway(ctx context.Context, visibility string, wafArn stri
 		{
 			Name:     "http",
 			Protocol: gwapiv1.HTTPProtocolType,
-			Port:     80,
+			Port:     gwapiv1.PortNumber(p.httpPort),
 		},
 	}
 

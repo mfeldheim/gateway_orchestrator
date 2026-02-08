@@ -220,7 +220,7 @@ func TestPool_SelectGateway(t *testing.T) {
 				WithRuntimeObjects(objs...).
 				Build()
 
-			pool := NewPool(client, "edge", "aws-alb")
+			pool := NewPool(client, "edge", "aws-alb", 0, 0)
 			ctx := context.Background()
 
 			got, err := pool.SelectGateway(ctx, tt.visibility, "", tt.selector)
@@ -329,7 +329,7 @@ func TestPool_GetNextGatewayIndex(t *testing.T) {
 				WithRuntimeObjects(objs...).
 				Build()
 
-			pool := NewPool(client, "edge", "aws-alb")
+			pool := NewPool(client, "edge", "aws-alb", 0, 0)
 			ctx := context.Background()
 
 			got, err := pool.GetNextGatewayIndex(ctx)
@@ -352,7 +352,7 @@ func TestPool_CreateGateway(t *testing.T) {
 		WithScheme(scheme).
 		Build()
 
-	pool := NewPool(client, "edge", "aws-alb")
+	pool := NewPool(client, "edge", "aws-alb", 0, 0)
 	ctx := context.Background()
 
 	tests := []struct {
@@ -424,6 +424,87 @@ func TestPool_CreateGateway(t *testing.T) {
 			if len(gw.Spec.Listeners) != 2 {
 				t.Errorf("listener count = %v, want 2", len(gw.Spec.Listeners))
 			}
+
+			// Verify default ports (80/443) when created with 0,0
+			for _, l := range gw.Spec.Listeners {
+				switch l.Name {
+				case "https":
+					if l.Port != 443 {
+						t.Errorf("https port = %d, want 443", l.Port)
+					}
+				case "http":
+					if l.Port != 80 {
+						t.Errorf("http port = %d, want 80", l.Port)
+					}
+				}
+			}
 		})
+	}
+}
+
+func TestPool_CreateGateway_CustomPorts(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = gwapiv1.AddToScheme(scheme)
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	pool := NewPool(client, "edge", "aws-alb", 8080, 8443)
+	ctx := context.Background()
+
+	info, err := pool.CreateGateway(ctx, "internet-facing", "", 1)
+	if err != nil {
+		t.Fatalf("CreateGateway() error = %v", err)
+	}
+
+	// Verify pool exposes configured ports
+	if pool.HTTPPort() != 8080 {
+		t.Errorf("HTTPPort() = %d, want 8080", pool.HTTPPort())
+	}
+	if pool.HTTPSPort() != 8443 {
+		t.Errorf("HTTPSPort() = %d, want 8443", pool.HTTPSPort())
+	}
+
+	// Verify the Gateway listeners use custom ports
+	var gw gwapiv1.Gateway
+	err = client.Get(ctx, types.NamespacedName{Name: info.Name, Namespace: "edge"}, &gw)
+	if err != nil {
+		t.Fatalf("gateway not created: %v", err)
+	}
+
+	if len(gw.Spec.Listeners) != 2 {
+		t.Fatalf("listener count = %v, want 2", len(gw.Spec.Listeners))
+	}
+
+	for _, l := range gw.Spec.Listeners {
+		switch l.Name {
+		case "https":
+			if l.Port != 8443 {
+				t.Errorf("https port = %d, want 8443", l.Port)
+			}
+		case "http":
+			if l.Port != 8080 {
+				t.Errorf("http port = %d, want 8080", l.Port)
+			}
+		default:
+			t.Errorf("unexpected listener name: %s", l.Name)
+		}
+	}
+
+	// Verify targetgroupconfiguration annotation is set
+	tgcAnnotation := gw.Annotations["gateway.k8s.aws/targetgroupconfiguration"]
+	if tgcAnnotation != "gw-01-tgconfig" {
+		t.Errorf("targetgroupconfiguration annotation = %q, want %q", tgcAnnotation, "gw-01-tgconfig")
+	}
+}
+
+func TestPool_NewPool_DefaultPorts(t *testing.T) {
+	pool := NewPool(nil, "edge", "aws-alb", 0, 0)
+	if pool.HTTPPort() != 80 {
+		t.Errorf("HTTPPort() = %d, want 80", pool.HTTPPort())
+	}
+	if pool.HTTPSPort() != 443 {
+		t.Errorf("HTTPSPort() = %d, want 443", pool.HTTPSPort())
 	}
 }
