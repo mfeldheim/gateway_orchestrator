@@ -6,6 +6,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -375,6 +376,73 @@ func (r *GatewayHostnameRequestReconciler) removeNamespaceLabel(ctx context.Cont
 		}
 		logger.Info("Removed gateway access label from namespace", "namespace", ghr.Namespace)
 	}
+
+	return nil
+}
+
+// cleanupEmptyGateway checks if a Gateway has any assigned GatewayHostnameRequests.
+// If not, it deletes the Gateway and its LoadBalancerConfiguration.
+// excludeGHRNamespace and excludeGHRName identify the currently-deleting GHR to exclude from the count.
+// This implements idempotent cleanup: if the gateway is already deleted, it returns nil.
+func (r *GatewayHostnameRequestReconciler) cleanupEmptyGateway(ctx context.Context, gatewayName, gatewayNamespace, excludeGHRNamespace, excludeGHRName string) error {
+	logger := log.FromContext(ctx)
+
+	// Count how many GatewayHostnameRequests are still assigned to this Gateway
+	// (excluding the one currently being deleted)
+	var ghrList gatewayv1alpha1.GatewayHostnameRequestList
+	if err := r.List(ctx, &ghrList); err != nil {
+		logger.Error(err, "Failed to list GatewayHostnameRequests while checking if Gateway is empty")
+		return err
+	}
+
+	assignmentCount := 0
+	for _, ghr := range ghrList.Items {
+		// Skip the GHR that's currently being deleted
+		if ghr.Namespace == excludeGHRNamespace && ghr.Name == excludeGHRName {
+			continue
+		}
+		// Check both gateway name AND namespace to avoid cross-namespace confusion
+		if ghr.Status.AssignedGateway == gatewayName && 
+		   ghr.Status.AssignedGatewayNamespace == gatewayNamespace {
+			assignmentCount++
+		}
+	}
+
+	// If there are still assignments, don't delete the Gateway
+	if assignmentCount > 0 {
+		logger.Info("Gateway still has assignments, not cleaning up", "gateway", gatewayName, "assignments", assignmentCount)
+		return nil
+	}
+
+	logger.Info("Gateway has no remaining assignments, cleaning up", "gateway", gatewayName)
+
+	// Step 1: Delete LoadBalancerConfiguration
+	lbcName := fmt.Sprintf("%s-config", gatewayName)
+	lbcKey := types.NamespacedName{Name: lbcName, Namespace: gatewayNamespace}
+	lbc := &unstructured.Unstructured{}
+	lbc.SetGroupVersionKind(LoadBalancerConfigurationGVK)
+	if err := r.Get(ctx, lbcKey, lbc); err == nil {
+		// LoadBalancerConfiguration exists, delete it
+		if err := r.Delete(ctx, lbc); err != nil {
+			logger.Error(err, "Failed to delete LoadBalancerConfiguration", "name", lbcName)
+			return fmt.Errorf("failed to delete LoadBalancerConfiguration: %w", err)
+		}
+		logger.Info("Deleted LoadBalancerConfiguration", "name", lbcName)
+	}
+	// If not found, that's fine - it may have been manually deleted
+
+	// Step 2: Delete Gateway
+	var gw gwapiv1.Gateway
+	gwKey := types.NamespacedName{Name: gatewayName, Namespace: gatewayNamespace}
+	if err := r.Get(ctx, gwKey, &gw); err == nil {
+		// Gateway exists, delete it
+		if err := r.Delete(ctx, &gw); err != nil {
+			logger.Error(err, "Failed to delete Gateway", "name", gatewayName)
+			return fmt.Errorf("failed to delete Gateway: %w", err)
+		}
+		logger.Info("Deleted Gateway", "name", gatewayName)
+	}
+	// If not found, gateway is already deleted - success
 
 	return nil
 }
