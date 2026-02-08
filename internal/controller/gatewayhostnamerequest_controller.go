@@ -415,6 +415,12 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 		// Clear assignment after successful cleanup
 		ghr.Status.AssignedGateway = ""
 		ghr.Status.AssignedGatewayNamespace = ""
+		
+		// Persist status changes before removing finalizer
+		if err := r.Status().Update(ctx, ghr); err != nil {
+			logger.Error(err, "Failed to update status after clearing assignment")
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Step 8: Remove finalizer
