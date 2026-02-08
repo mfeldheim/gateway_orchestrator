@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -14,6 +15,8 @@ const (
 	// AWSCallTimeout is the default timeout for AWS API calls
 	AWSCallTimeout = 30 * time.Second
 )
+
+var ErrValidationRecordsNotReady = errors.New("validation records not ready")
 
 // withAWSTimeout returns a context with the standard AWS call timeout.
 // Always call cancel() after the AWS call completes to release resources.
@@ -57,10 +60,15 @@ func (r *GatewayHostnameRequestReconciler) ensureValidationRecords(ctx context.C
 		return fmt.Errorf("failed to get validation records: %w", err)
 	}
 
-	logger.Info("Retrieved validation records from ACM", 
-		"count", len(validationRecords), 
+	logger.Info("Retrieved validation records from ACM",
+		"count", len(validationRecords),
 		"certificateArn", ghr.Status.CertificateArn,
 		"hostname", ghr.Spec.Hostname)
+
+	if len(validationRecords) == 0 {
+		logger.Info("ACM validation records not ready yet", "certificateArn", ghr.Status.CertificateArn, "hostname", ghr.Spec.Hostname)
+		return ErrValidationRecordsNotReady
+	}
 
 	// Create each validation record in Route53
 	for _, valRec := range validationRecords {
@@ -75,20 +83,20 @@ func (r *GatewayHostnameRequestReconciler) ensureValidationRecords(ctx context.C
 		err := r.Route53Client.CreateOrUpdateRecord(recordCtx, ghr.Spec.ZoneId, record)
 		recordCancel()
 		if err != nil {
-			logger.Error(err, "Failed to create validation record", 
-				"name", record.Name, 
+			logger.Error(err, "Failed to create validation record",
+				"name", record.Name,
 				"zoneId", ghr.Spec.ZoneId,
 				"hostname", ghr.Spec.Hostname)
 			return fmt.Errorf("failed to create validation record: %w", err)
 		}
 
-		logger.Info("Created validation record in Route53", 
-			"name", record.Name, 
+		logger.Info("Created validation record in Route53",
+			"name", record.Name,
 			"type", record.Type,
 			"zoneId", ghr.Spec.ZoneId)
 	}
 
-	logger.Info("All validation records created successfully", 
+	logger.Info("All validation records created successfully",
 		"count", len(validationRecords),
 		"hostname", ghr.Spec.Hostname)
 	return nil
