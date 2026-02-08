@@ -47,8 +47,8 @@ func TestCleanupEmptyGateway_WithAssignments_DoesNotDelete(t *testing.T) {
 		Client: client,
 	}
 
-	// Execute
-	err := reconciler.cleanupEmptyGateway(context.Background(), "gw-01", "edge")
+	// Execute - exclude a non-existent GHR (simulates checking from a different deletion)
+	err := reconciler.cleanupEmptyGateway(context.Background(), "gw-01", "edge", "other-ns", "other-ghr")
 
 	// Assert
 	assert.NoError(t, err)
@@ -74,8 +74,8 @@ func TestCleanupEmptyGateway_NoAssignments_DeletesGateway(t *testing.T) {
 		Client: client,
 	}
 
-	// Execute
-	err := reconciler.cleanupEmptyGateway(context.Background(), "gw-01", "edge")
+	// Execute - exclude non-existent GHR
+	err := reconciler.cleanupEmptyGateway(context.Background(), "gw-01", "edge", "", "")
 
 	// Assert
 	assert.NoError(t, err)
@@ -117,8 +117,8 @@ func TestCleanupEmptyGateway_RaceCondition_IgnoresOtherNamespaceAssignments(t *t
 		Client: client,
 	}
 
-	// Execute cleanup for gw-01 in "edge" namespace (not "other-edge")
-	err := reconciler.cleanupEmptyGateway(context.Background(), "gw-01", "edge")
+	// Execute cleanup for gw-01 in "edge" namespace (not "other-edge"), exclude non-existent GHR
+	err := reconciler.cleanupEmptyGateway(context.Background(), "gw-01", "edge", "", "")
 
 	// Assert - should delete because the assignment is in different namespace
 	assert.NoError(t, err)
@@ -157,8 +157,8 @@ func TestCleanupEmptyGateway_MultipleGHRs_DeletesOnlyWhenAllRemoved(t *testing.T
 		Client: client,
 	}
 
-	// Execute - should NOT delete because ghr1 still has assignment
-	err := reconciler.cleanupEmptyGateway(context.Background(), "gw-01", "edge")
+	// Execute - should NOT delete because ghr1 still has assignment (exclude different GHR)
+	err := reconciler.cleanupEmptyGateway(context.Background(), "gw-01", "edge", "other-ns", "other-ghr")
 	assert.NoError(t, err)
 
 	// Verify Gateway still exists
@@ -166,14 +166,8 @@ func TestCleanupEmptyGateway_MultipleGHRs_DeletesOnlyWhenAllRemoved(t *testing.T
 	err = client.Get(context.Background(), types.NamespacedName{Name: "gw-01", Namespace: "edge"}, &stillExistingGateway)
 	assert.NoError(t, err)
 
-	// Now delete the assignment
-	ghr1.Status.AssignedGateway = ""
-	ghr1.Status.AssignedGatewayNamespace = ""
-	err = client.Update(context.Background(), ghr1)
-	assert.NoError(t, err)
-
-	// Execute again - should delete now
-	err = reconciler.cleanupEmptyGateway(context.Background(), "gw-01", "edge")
+	// Now simulate ghr1 being deleted - exclude it from count
+	err = reconciler.cleanupEmptyGateway(context.Background(), "gw-01", "edge", "default", "ghr-1")
 	assert.NoError(t, err)
 
 	// Verify Gateway was deleted
@@ -194,7 +188,7 @@ func TestCleanupEmptyGateway_AlreadyDeletedGateway_ReturnsNil(t *testing.T) {
 	}
 
 	// Execute - should not error even though Gateway doesn't exist
-	err := reconciler.cleanupEmptyGateway(context.Background(), "gw-01", "edge")
+	err := reconciler.cleanupEmptyGateway(context.Background(), "gw-01", "edge", "", "")
 
 	// Assert - idempotent: should be no error
 	assert.NoError(t, err)
@@ -242,7 +236,7 @@ func TestCleanupEmptyGateway_CountsOnlyAssignedGHRs(t *testing.T) {
 	}
 
 	// Execute - should NOT delete gw-01 because ghr1 is still assigned
-	err := reconciler.cleanupEmptyGateway(context.Background(), "gw-01", "edge")
+	err := reconciler.cleanupEmptyGateway(context.Background(), "gw-01", "edge", "", "")
 	assert.NoError(t, err)
 
 	// Verify Gateway still exists
@@ -282,7 +276,7 @@ func TestCleanupEmptyGateway_WithLoadBalancerConfig_DeletesBoth(t *testing.T) {
 	}
 
 	// Execute
-	err := reconciler.cleanupEmptyGateway(context.Background(), "gw-01", "edge")
+	err := reconciler.cleanupEmptyGateway(context.Background(), "gw-01", "edge", "", "")
 
 	// Assert
 	assert.NoError(t, err)

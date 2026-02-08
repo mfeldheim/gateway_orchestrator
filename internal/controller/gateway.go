@@ -382,11 +382,13 @@ func (r *GatewayHostnameRequestReconciler) removeNamespaceLabel(ctx context.Cont
 
 // cleanupEmptyGateway checks if a Gateway has any assigned GatewayHostnameRequests.
 // If not, it deletes the Gateway and its LoadBalancerConfiguration.
+// excludeGHRNamespace and excludeGHRName identify the currently-deleting GHR to exclude from the count.
 // This implements idempotent cleanup: if the gateway is already deleted, it returns nil.
-func (r *GatewayHostnameRequestReconciler) cleanupEmptyGateway(ctx context.Context, gatewayName, gatewayNamespace string) error {
+func (r *GatewayHostnameRequestReconciler) cleanupEmptyGateway(ctx context.Context, gatewayName, gatewayNamespace, excludeGHRNamespace, excludeGHRName string) error {
 	logger := log.FromContext(ctx)
 
 	// Count how many GatewayHostnameRequests are still assigned to this Gateway
+	// (excluding the one currently being deleted)
 	var ghrList gatewayv1alpha1.GatewayHostnameRequestList
 	if err := r.List(ctx, &ghrList); err != nil {
 		logger.Error(err, "Failed to list GatewayHostnameRequests while checking if Gateway is empty")
@@ -395,6 +397,10 @@ func (r *GatewayHostnameRequestReconciler) cleanupEmptyGateway(ctx context.Conte
 
 	assignmentCount := 0
 	for _, ghr := range ghrList.Items {
+		// Skip the GHR that's currently being deleted
+		if ghr.Namespace == excludeGHRNamespace && ghr.Name == excludeGHRName {
+			continue
+		}
 		// Check both gateway name AND namespace to avoid cross-namespace confusion
 		if ghr.Status.AssignedGateway == gatewayName && 
 		   ghr.Status.AssignedGatewayNamespace == gatewayNamespace {
