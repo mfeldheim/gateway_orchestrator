@@ -16,7 +16,7 @@ const (
 )
 
 // withAWSTimeout returns a context with the standard AWS call timeout.
-// Always defer the cancel function to release resources.
+// Always call cancel() after the AWS call completes to release resources.
 func withAWSTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, AWSCallTimeout)
 }
