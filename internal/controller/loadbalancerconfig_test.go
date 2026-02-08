@@ -10,12 +10,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	gatewayv1alpha1 "github.com/michelfeldheim/gateway-orchestrator/api/v1alpha1"
+	"github.com/michelfeldheim/gateway-orchestrator/internal/gateway"
 )
 
-// TestEnsureLoadBalancerConfiguration_IncludesTargetTypeIP verifies that
-// ensureLoadBalancerConfiguration creates a LoadBalancerConfiguration with
-// targetGroupConfiguration.targetType set to "ip" to enable ClusterIP services.
-func TestEnsureLoadBalancerConfiguration_IncludesTargetTypeIP(t *testing.T) {
+// TestEnsureLoadBalancerConfiguration_DoesNotIncludeTargetGroupConfiguration verifies that
+// ensureLoadBalancerConfiguration does NOT put targetGroupConfiguration in the LBC spec
+// (it's a separate CRD: TargetGroupConfiguration).
+func TestEnsureLoadBalancerConfiguration_DoesNotIncludeTargetGroupConfiguration(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = gatewayv1alpha1.AddToScheme(scheme)
 
@@ -44,24 +45,189 @@ func TestEnsureLoadBalancerConfiguration_IncludesTargetTypeIP(t *testing.T) {
 		t.Fatalf("LoadBalancerConfiguration not found: %v", err)
 	}
 
-	// Extract spec and verify targetGroupConfiguration
+	// Verify targetGroupConfiguration is NOT in the LBC spec
 	spec, ok := lbc.Object["spec"].(map[string]interface{})
 	if !ok {
 		t.Fatal("spec not found or invalid type")
 	}
 
-	targetGroupConfig, ok := spec["targetGroupConfiguration"].(map[string]interface{})
-	if !ok {
-		t.Fatal("targetGroupConfiguration not found in spec")
+	if _, exists := spec["targetGroupConfiguration"]; exists {
+		t.Error("targetGroupConfiguration should NOT be in LoadBalancerConfiguration spec (it's a separate CRD)")
+	}
+}
+
+// TestEnsureTargetGroupConfiguration_CreatesWithTargetTypeIP verifies that
+// ensureTargetGroupConfiguration creates a separate TargetGroupConfiguration with
+// defaultConfiguration.targetType set to "ip" to enable ClusterIP services.
+func TestEnsureTargetGroupConfiguration_CreatesWithTargetTypeIP(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = gatewayv1alpha1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	reconciler := &GatewayHostnameRequestReconciler{
+		Client: fakeClient,
 	}
 
-	targetType, ok := targetGroupConfig["targetType"].(string)
+	ctx := context.Background()
+
+	err := reconciler.ensureTargetGroupConfiguration(ctx, "gw-01", "edge")
+	if err != nil {
+		t.Fatalf("ensureTargetGroupConfiguration() error = %v", err)
+	}
+
+	// Verify the TargetGroupConfiguration was created
+	tgc := &unstructured.Unstructured{}
+	tgc.SetGroupVersionKind(TargetGroupConfigurationGVK)
+	err = fakeClient.Get(ctx, types.NamespacedName{Name: "gw-01-tgconfig", Namespace: "edge"}, tgc)
+	if err != nil {
+		t.Fatalf("TargetGroupConfiguration not found: %v", err)
+	}
+
+	spec, ok := tgc.Object["spec"].(map[string]interface{})
+	if !ok {
+		t.Fatal("spec not found or invalid type")
+	}
+
+	defaultConfig, ok := spec["defaultConfiguration"].(map[string]interface{})
+	if !ok {
+		t.Fatal("defaultConfiguration not found in spec")
+	}
+
+	targetType, ok := defaultConfig["targetType"].(string)
 	if !ok {
 		t.Fatal("targetType not found or not a string")
 	}
 
 	if targetType != "ip" {
 		t.Errorf("targetType = %q, want %q", targetType, "ip")
+	}
+}
+
+// TestEnsureTargetGroupConfiguration_IdempotentWhenAlreadyCorrect verifies that
+// calling ensureTargetGroupConfiguration twice doesn't cause errors.
+func TestEnsureTargetGroupConfiguration_IdempotentWhenAlreadyCorrect(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = gatewayv1alpha1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	reconciler := &GatewayHostnameRequestReconciler{
+		Client: fakeClient,
+	}
+
+	ctx := context.Background()
+
+	// First call creates
+	if err := reconciler.ensureTargetGroupConfiguration(ctx, "gw-01", "edge"); err != nil {
+		t.Fatalf("first call error = %v", err)
+	}
+
+	// Second call should be a no-op (already correct)
+	if err := reconciler.ensureTargetGroupConfiguration(ctx, "gw-01", "edge"); err != nil {
+		t.Fatalf("second call error = %v", err)
+	}
+}
+
+// TestEnsureLoadBalancerConfiguration_CustomPorts verifies that the LBC uses
+// configurable ports from the GatewayPool when set, and defaults to 80/443 otherwise.
+func TestEnsureLoadBalancerConfiguration_CustomPorts(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = gatewayv1alpha1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	pool := gateway.NewPool(fakeClient, "edge", "aws-alb", 8080, 8443)
+
+	reconciler := &GatewayHostnameRequestReconciler{
+		Client:      fakeClient,
+		GatewayPool: pool,
+	}
+
+	ctx := context.Background()
+	certs := []string{"arn:aws:acm:eu-west-1:123456789012:certificate/test-cert"}
+
+	err := reconciler.ensureLoadBalancerConfiguration(ctx, "gw-01", "edge", certs, "internet-facing", "")
+	if err != nil {
+		t.Fatalf("ensureLoadBalancerConfiguration() error = %v", err)
+	}
+
+	// Verify the LoadBalancerConfiguration was created with custom ports
+	lbc := &unstructured.Unstructured{}
+	lbc.SetGroupVersionKind(LoadBalancerConfigurationGVK)
+	err = fakeClient.Get(ctx, types.NamespacedName{Name: "gw-01-config", Namespace: "edge"}, lbc)
+	if err != nil {
+		t.Fatalf("LoadBalancerConfiguration not found: %v", err)
+	}
+
+	spec, ok := lbc.Object["spec"].(map[string]interface{})
+	if !ok {
+		t.Fatal("spec not found or invalid type")
+	}
+
+	listenerConfigs, ok := spec["listenerConfigurations"].([]interface{})
+	if !ok || len(listenerConfigs) == 0 {
+		t.Fatal("listenerConfigurations not found or empty")
+	}
+
+	// Check HTTPS listener uses custom port
+	httpsListener, ok := listenerConfigs[0].(map[string]interface{})
+	if !ok {
+		t.Fatal("first listener config is not a map")
+	}
+	if httpsListener["protocolPort"] != "HTTPS:8443" {
+		t.Errorf("HTTPS protocolPort = %v, want HTTPS:8443", httpsListener["protocolPort"])
+	}
+
+	// Check HTTP listener uses custom port
+	httpListener, ok := listenerConfigs[1].(map[string]interface{})
+	if !ok {
+		t.Fatal("second listener config is not a map")
+	}
+	if httpListener["protocolPort"] != "HTTP:8080" {
+		t.Errorf("HTTP protocolPort = %v, want HTTP:8080", httpListener["protocolPort"])
+	}
+}
+
+// TestEnsureLoadBalancerConfiguration_DefaultPorts verifies that when no GatewayPool
+// is set (e.g., in tests), the LBC defaults to standard ports 80 and 443.
+func TestEnsureLoadBalancerConfiguration_DefaultPorts(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = gatewayv1alpha1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	// Reconciler without GatewayPool - should use defaults
+	reconciler := &GatewayHostnameRequestReconciler{
+		Client: fakeClient,
+	}
+
+	ctx := context.Background()
+	certs := []string{"arn:aws:acm:eu-west-1:123456789012:certificate/test-cert"}
+
+	err := reconciler.ensureLoadBalancerConfiguration(ctx, "gw-01", "edge", certs, "internet-facing", "")
+	if err != nil {
+		t.Fatalf("ensureLoadBalancerConfiguration() error = %v", err)
+	}
+
+	lbc := &unstructured.Unstructured{}
+	lbc.SetGroupVersionKind(LoadBalancerConfigurationGVK)
+	err = fakeClient.Get(ctx, types.NamespacedName{Name: "gw-01-config", Namespace: "edge"}, lbc)
+	if err != nil {
+		t.Fatalf("LoadBalancerConfiguration not found: %v", err)
+	}
+
+	spec := lbc.Object["spec"].(map[string]interface{})
+	listenerConfigs := spec["listenerConfigurations"].([]interface{})
+
+	httpsListener := listenerConfigs[0].(map[string]interface{})
+	if httpsListener["protocolPort"] != "HTTPS:443" {
+		t.Errorf("HTTPS protocolPort = %v, want HTTPS:443", httpsListener["protocolPort"])
+	}
+
+	httpListener := listenerConfigs[1].(map[string]interface{})
+	if httpListener["protocolPort"] != "HTTP:80" {
+		t.Errorf("HTTP protocolPort = %v, want HTTP:80", httpListener["protocolPort"])
 	}
 }
 

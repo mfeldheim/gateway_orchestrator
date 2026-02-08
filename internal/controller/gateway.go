@@ -75,6 +75,11 @@ func (r *GatewayHostnameRequestReconciler) ensureGatewayAssignment(ctx context.C
 			return fmt.Errorf("failed to create LoadBalancerConfiguration: %w", err)
 		}
 
+		// Create TargetGroupConfiguration for ClusterIP support (targetType: ip)
+		if err := r.ensureTargetGroupConfiguration(ctx, gatewayName, gatewayNamespace); err != nil {
+			return fmt.Errorf("failed to create TargetGroupConfiguration: %w", err)
+		}
+
 		// Now create Gateway referencing the LoadBalancerConfiguration
 		gwInfo, err = r.GatewayPool.CreateGateway(ctx, visibility, ghr.Spec.WafArn, index)
 		if err != nil {

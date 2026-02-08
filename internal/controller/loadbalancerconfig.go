@@ -20,6 +20,13 @@ var LoadBalancerConfigurationGVK = schema.GroupVersionKind{
 	Kind:    "LoadBalancerConfiguration",
 }
 
+// TargetGroupConfigurationGVK is the GVK for AWS TargetGroupConfiguration
+var TargetGroupConfigurationGVK = schema.GroupVersionKind{
+	Group:   "gateway.k8s.aws",
+	Version: "v1beta1",
+	Kind:    "TargetGroupConfiguration",
+}
+
 // ensureLoadBalancerConfiguration creates or updates the LoadBalancerConfiguration for a Gateway
 // with all certificate ARNs from GatewayHostnameRequests assigned to that Gateway
 // wafArn can be empty (no WAF) or a WAF ARN to associate with the load balancer
@@ -58,7 +65,7 @@ func (r *GatewayHostnameRequestReconciler) ensureLoadBalancerConfiguration(
 
 		// HTTPS listener with certificates
 		httpsListener := map[string]interface{}{
-			"protocolPort":       "HTTPS:443",
+			"protocolPort":       fmt.Sprintf("HTTPS:%d", r.httpsPort()),
 			"defaultCertificate": sortedCerts[0], // First cert is default (now deterministic)
 		}
 		if len(sortedCerts) > 1 {
@@ -75,7 +82,7 @@ func (r *GatewayHostnameRequestReconciler) ensureLoadBalancerConfiguration(
 
 	// HTTP listener (no certs needed)
 	httpListener := map[string]interface{}{
-		"protocolPort": "HTTP:80",
+		"protocolPort": fmt.Sprintf("HTTP:%d", r.httpPort()),
 	}
 	listenerConfigs = append(listenerConfigs, httpListener)
 
@@ -83,14 +90,13 @@ func (r *GatewayHostnameRequestReconciler) ensureLoadBalancerConfiguration(
 	spec := map[string]interface{}{
 		"scheme":                 visibility,
 		"listenerConfigurations": listenerConfigs,
-		"targetGroupConfiguration": map[string]interface{}{
-			"targetType": "ip",
-		},
 	}
 
 	// Add WAF if specified
 	if wafArn != "" {
-		spec["wafArn"] = wafArn
+		spec["wafV2"] = map[string]interface{}{
+			"arnOrName": wafArn,
+		}
 	}
 
 	if err != nil {
@@ -133,6 +139,22 @@ func (r *GatewayHostnameRequestReconciler) getGatewayCertificateARNs(ctx context
 	return arns, nil
 }
 
+// httpPort returns the configured HTTP listener port, defaulting to 80
+func (r *GatewayHostnameRequestReconciler) httpPort() int32 {
+	if r.GatewayPool != nil {
+		return r.GatewayPool.HTTPPort()
+	}
+	return 80
+}
+
+// httpsPort returns the configured HTTPS listener port, defaulting to 443
+func (r *GatewayHostnameRequestReconciler) httpsPort() int32 {
+	if r.GatewayPool != nil {
+		return r.GatewayPool.HTTPSPort()
+	}
+	return 443
+}
+
 // deleteLoadBalancerConfiguration removes the LoadBalancerConfiguration for a Gateway
 func (r *GatewayHostnameRequestReconciler) deleteLoadBalancerConfiguration(ctx context.Context, gatewayName, gatewayNamespace string) error {
 	logger := log.FromContext(ctx)
@@ -149,5 +171,72 @@ func (r *GatewayHostnameRequestReconciler) deleteLoadBalancerConfiguration(ctx c
 	}
 
 	logger.Info("Deleted LoadBalancerConfiguration", "name", configName)
+
+	// Also delete the TargetGroupConfiguration
+	_ = r.deleteTargetGroupConfiguration(ctx, gatewayName, gatewayNamespace)
+
+	return nil
+}
+
+// ensureTargetGroupConfiguration creates or updates the TargetGroupConfiguration for a Gateway
+// to use IP-based target groups, enabling ClusterIP services (default K8s service type).
+func (r *GatewayHostnameRequestReconciler) ensureTargetGroupConfiguration(ctx context.Context, gatewayName, gatewayNamespace string) error {
+	logger := log.FromContext(ctx)
+
+	configName := fmt.Sprintf("%s-tgconfig", gatewayName)
+
+	existing := &unstructured.Unstructured{}
+	existing.SetGroupVersionKind(TargetGroupConfigurationGVK)
+	err := r.Get(ctx, types.NamespacedName{Name: configName, Namespace: gatewayNamespace}, existing)
+
+	spec := map[string]interface{}{
+		"defaultConfiguration": map[string]interface{}{
+			"targetType": "ip",
+		},
+	}
+
+	if err != nil {
+		// Create new TargetGroupConfiguration
+		tgConfig := &unstructured.Unstructured{}
+		tgConfig.SetGroupVersionKind(TargetGroupConfigurationGVK)
+		tgConfig.SetName(configName)
+		tgConfig.SetNamespace(gatewayNamespace)
+		tgConfig.Object["spec"] = spec
+
+		if err := r.Create(ctx, tgConfig); err != nil {
+			return fmt.Errorf("failed to create TargetGroupConfiguration %s: %w", configName, err)
+		}
+		logger.Info("Created TargetGroupConfiguration", "name", configName, "targetType", "ip")
+	} else {
+		// Update existing if needed
+		existingSpec, _ := existing.Object["spec"].(map[string]interface{})
+		existingDefault, _ := existingSpec["defaultConfiguration"].(map[string]interface{})
+		if existingDefault["targetType"] != "ip" {
+			existing.Object["spec"] = spec
+			if err := r.Update(ctx, existing); err != nil {
+				return fmt.Errorf("failed to update TargetGroupConfiguration %s: %w", configName, err)
+			}
+			logger.Info("Updated TargetGroupConfiguration", "name", configName, "targetType", "ip")
+		}
+	}
+
+	return nil
+}
+
+// deleteTargetGroupConfiguration removes the TargetGroupConfiguration for a Gateway
+func (r *GatewayHostnameRequestReconciler) deleteTargetGroupConfiguration(ctx context.Context, gatewayName, gatewayNamespace string) error {
+	logger := log.FromContext(ctx)
+	configName := fmt.Sprintf("%s-tgconfig", gatewayName)
+
+	config := &unstructured.Unstructured{}
+	config.SetGroupVersionKind(TargetGroupConfigurationGVK)
+	config.SetName(configName)
+	config.SetNamespace(gatewayNamespace)
+
+	if err := r.Delete(ctx, config); err != nil {
+		return nil
+	}
+
+	logger.Info("Deleted TargetGroupConfiguration", "name", configName)
 	return nil
 }

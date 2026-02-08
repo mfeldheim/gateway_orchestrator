@@ -41,6 +41,8 @@ func main() {
 	var probeAddr string
 	var gatewayNamespace string
 	var gatewayClassName string
+	var httpPort int
+	var httpsPort int
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -49,6 +51,8 @@ func main() {
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.StringVar(&gatewayNamespace, "gateway-namespace", "edge", "Namespace where Gateway resources are managed.")
 	flag.StringVar(&gatewayClassName, "gateway-class", "aws-alb", "GatewayClass name to use for new Gateways.")
+	flag.IntVar(&httpPort, "http-port", 80, "HTTP listener port for created Gateways.")
+	flag.IntVar(&httpsPort, "https-port", 443, "HTTPS listener port for created Gateways.")
 
 	opts := zap.Options{
 		Development: true,
@@ -85,7 +89,7 @@ func main() {
 	}
 
 	// Create Gateway pool
-	gatewayPool := gateway.NewPool(mgr.GetClient(), gatewayNamespace, gatewayClassName)
+	gatewayPool := gateway.NewPool(mgr.GetClient(), gatewayNamespace, gatewayClassName, int32(httpPort), int32(httpsPort))
 
 	// Setup GatewayHostnameRequest controller
 	if err = (&controller.GatewayHostnameRequestReconciler{
@@ -102,7 +106,9 @@ func main() {
 
 	setupLog.Info("Controller registered",
 		"gatewayNamespace", gatewayNamespace,
-		"gatewayClassName", gatewayClassName)
+		"gatewayClassName", gatewayClassName,
+		"httpPort", httpPort,
+		"httpsPort", httpsPort)
 
 	//+kubebuilder:scaffold:builder
 
