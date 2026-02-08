@@ -4,11 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -186,6 +187,11 @@ func (r *GatewayHostnameRequestReconciler) reconcileNormal(ctx context.Context, 
 	// Step 4: Ensure DNS validation records
 	if !meta.IsStatusConditionTrue(ghr.Status.Conditions, ConditionTypeDnsValidated) {
 		if err := r.ensureValidationRecords(ctx, ghr); err != nil {
+			if errors.Is(err, ErrValidationRecordsNotReady) {
+				r.setCondition(ghr, ConditionTypeDnsValidated, metav1.ConditionFalse, "PendingValidationRecords", "Waiting for ACM to provide DNS validation records")
+				_ = r.Status().Update(ctx, ghr)
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
 			r.setCondition(ghr, ConditionTypeDnsValidated, metav1.ConditionFalse, "ValidationRecordFailed", err.Error())
 			_ = r.Status().Update(ctx, ghr)
 			return ctrl.Result{}, err
@@ -314,7 +320,7 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 		err := r.Route53Client.DeleteRecord(awsCtx, ghr.Spec.ZoneId, aliasRecord)
 		cancel()
 		if err != nil {
-			logger.Error(err, "Failed to delete Route53 alias record", 
+			logger.Error(err, "Failed to delete Route53 alias record",
 				"hostname", ghr.Spec.Hostname,
 				"zoneId", ghr.Spec.ZoneId)
 		} else {
@@ -325,7 +331,7 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 	// Step 2: Remove certificate ARN from Gateway annotation (triggers AWS LBC to update ALB)
 	if ghr.Status.AssignedGateway != "" && ghr.Status.CertificateArn != "" {
 		if err := r.removeCertificateFromGateway(ctx, ghr); err != nil {
-			logger.Error(err, "Failed to remove certificate from gateway", 
+			logger.Error(err, "Failed to remove certificate from gateway",
 				"gateway", ghr.Status.AssignedGateway,
 				"hostname", ghr.Spec.Hostname)
 		} else {
@@ -335,7 +341,7 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 
 	// Step 3: Remove namespace label for gateway access
 	if err := r.removeNamespaceLabel(ctx, ghr); err != nil {
-		logger.Error(err, "Failed to remove namespace label", 
+		logger.Error(err, "Failed to remove namespace label",
 			"namespace", ghr.Namespace,
 			"hostname", ghr.Spec.Hostname)
 	}
@@ -357,7 +363,7 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 				err := r.Route53Client.DeleteRecord(recordCtx, ghr.Spec.ZoneId, record)
 				recordCancel()
 				if err != nil {
-					logger.Error(err, "Failed to delete validation record", 
+					logger.Error(err, "Failed to delete validation record",
 						"name", vr.Name,
 						"hostname", ghr.Spec.Hostname)
 				}
@@ -391,7 +397,7 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 		err = r.ACMClient.DeleteCertificate(awsCtx, ghr.Status.CertificateArn)
 		cancel()
 		if err != nil {
-			logger.Error(err, "Failed to delete ACM certificate", 
+			logger.Error(err, "Failed to delete ACM certificate",
 				"arn", ghr.Status.CertificateArn,
 				"hostname", ghr.Spec.Hostname)
 		} else {
@@ -415,7 +421,7 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 		// Clear assignment after successful cleanup
 		ghr.Status.AssignedGateway = ""
 		ghr.Status.AssignedGatewayNamespace = ""
-		
+
 		// Persist status changes before removing finalizer
 		if err := r.Status().Update(ctx, ghr); err != nil {
 			logger.Error(err, "Failed to update status after clearing assignment")
@@ -515,7 +521,7 @@ func (r *GatewayHostnameRequestReconciler) cleanupForReprovisioning(ctx context.
 		err := r.Route53Client.DeleteRecord(awsCtx, ghr.Spec.ZoneId, aliasRecord)
 		cancel()
 		if err != nil {
-			logger.Error(err, "Failed to delete Route53 alias record during reprovisioning", 
+			logger.Error(err, "Failed to delete Route53 alias record during reprovisioning",
 				"hostname", ghr.Spec.Hostname)
 		} else {
 			logger.Info("Deleted Route53 alias record during reprovisioning", "hostname", ghr.Spec.Hostname)
@@ -534,7 +540,7 @@ func (r *GatewayHostnameRequestReconciler) cleanupForReprovisioning(ctx context.
 
 	// Step 3: Remove namespace label for gateway access
 	if err := r.removeNamespaceLabel(ctx, ghr); err != nil {
-		logger.Error(err, "Failed to remove namespace label during reprovisioning", 
+		logger.Error(err, "Failed to remove namespace label during reprovisioning",
 			"namespace", ghr.Namespace)
 	}
 
@@ -555,7 +561,7 @@ func (r *GatewayHostnameRequestReconciler) cleanupForReprovisioning(ctx context.
 				err := r.Route53Client.DeleteRecord(recordCtx, ghr.Spec.ZoneId, record)
 				recordCancel()
 				if err != nil {
-					logger.Error(err, "Failed to delete validation record during reprovisioning", 
+					logger.Error(err, "Failed to delete validation record during reprovisioning",
 						"name", vr.Name)
 				}
 			}
@@ -569,7 +575,7 @@ func (r *GatewayHostnameRequestReconciler) cleanupForReprovisioning(ctx context.
 		err := r.ACMClient.DeleteCertificate(awsCtx, ghr.Status.CertificateArn)
 		cancel()
 		if err != nil {
-			logger.Error(err, "Failed to delete ACM certificate during reprovisioning (may still be in use)", 
+			logger.Error(err, "Failed to delete ACM certificate during reprovisioning (may still be in use)",
 				"arn", ghr.Status.CertificateArn)
 		} else {
 			logger.Info("Deleted ACM certificate during reprovisioning", "arn", ghr.Status.CertificateArn)
@@ -660,7 +666,7 @@ func (r *GatewayHostnameRequestReconciler) validateAssignedResources(ctx context
 			Namespace: ghr.Status.AssignedGatewayNamespace,
 		}, &gw)
 		if err != nil {
-			if errors.IsNotFound(err) {
+			if apierrors.IsNotFound(err) {
 				logger.Info("Drift detected: Gateway no longer exists", "gateway", ghr.Status.AssignedGateway)
 				r.Recorder.Eventf(ghr, corev1.EventTypeWarning, "DriftDetected", "Gateway %s no longer exists", ghr.Status.AssignedGateway)
 				// Clear conditions to trigger reassignment
@@ -681,7 +687,7 @@ func (r *GatewayHostnameRequestReconciler) validateAssignedResources(ctx context
 				Name:      lbcName,
 				Namespace: ghr.Status.AssignedGatewayNamespace,
 			}, lbc)
-			if err != nil && errors.IsNotFound(err) {
+			if err != nil && apierrors.IsNotFound(err) {
 				logger.Info("Drift detected: LoadBalancerConfiguration no longer exists", "name", lbcName)
 				r.Recorder.Eventf(ghr, corev1.EventTypeWarning, "DriftDetected", "LoadBalancerConfiguration %s no longer exists", lbcName)
 				// Clear condition to trigger recreation
@@ -699,8 +705,8 @@ func (r *GatewayHostnameRequestReconciler) validateAssignedResources(ctx context
 		certDetails, err := r.ACMClient.DescribeCertificate(awsCtx, ghr.Status.CertificateArn)
 		cancel()
 		if err != nil {
-			logger.Info("Drift detected: ACM certificate no longer exists or is inaccessible", 
-				"arn", ghr.Status.CertificateArn, 
+			logger.Info("Drift detected: ACM certificate no longer exists or is inaccessible",
+				"arn", ghr.Status.CertificateArn,
 				"error", err,
 				"hostname", ghr.Spec.Hostname)
 			r.Recorder.Eventf(ghr, corev1.EventTypeWarning, "DriftDetected", "ACM certificate %s no longer exists", ghr.Status.CertificateArn)

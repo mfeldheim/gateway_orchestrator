@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -103,6 +104,47 @@ func TestReconciler_ensureValidationRecords(t *testing.T) {
 
 	if record.Value != validationRecords[0].Value {
 		t.Errorf("record value = %v, want %v", record.Value, validationRecords[0].Value)
+	}
+}
+
+func TestReconciler_ensureValidationRecords_PendingACMRecords(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = gatewayv1alpha1.AddToScheme(scheme)
+
+	acmClient := aws.NewMockACMClient()
+	route53Client := aws.NewMockRoute53Client()
+
+	r := &GatewayHostnameRequestReconciler{
+		ACMClient:     acmClient,
+		Route53Client: route53Client,
+	}
+
+	ctx := context.Background()
+
+	// Request a certificate and then simulate ACM returning no validation records yet
+	arn, _ := acmClient.RequestCertificate(ctx, "test.example.com", nil)
+	acmClient.ValidationRecords[arn] = []aws.ValidationRecord{}
+
+	ghr := &gatewayv1alpha1.GatewayHostnameRequest{
+		Spec: gatewayv1alpha1.GatewayHostnameRequestSpec{
+			ZoneId:   "Z123456",
+			Hostname: "test.example.com",
+		},
+		Status: gatewayv1alpha1.GatewayHostnameRequestStatus{
+			CertificateArn: arn,
+		},
+	}
+
+	err := r.ensureValidationRecords(ctx, ghr)
+	if err == nil {
+		t.Fatal("expected ErrValidationRecordsNotReady, got nil")
+	}
+	if !errors.Is(err, ErrValidationRecordsNotReady) {
+		t.Fatalf("expected ErrValidationRecordsNotReady, got %v", err)
+	}
+
+	if len(route53Client.Records) != 0 {
+		t.Fatalf("expected no Route53 records to be created, got %d", len(route53Client.Records))
 	}
 }
 
