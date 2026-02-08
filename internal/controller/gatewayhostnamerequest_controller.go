@@ -310,15 +310,16 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 				EvaluateTargetHealth: true,
 			},
 		}
-		awsCtx, cancel := context.WithTimeout(ctx, AWSCallTimeout)
-		if err := r.Route53Client.DeleteRecord(awsCtx, ghr.Spec.ZoneId, aliasRecord); err != nil {
+		awsCtx, cancel := withAWSTimeout(ctx)
+		err := r.Route53Client.DeleteRecord(awsCtx, ghr.Spec.ZoneId, aliasRecord)
+		cancel()
+		if err != nil {
 			logger.Error(err, "Failed to delete Route53 alias record", 
 				"hostname", ghr.Spec.Hostname,
 				"zoneId", ghr.Spec.ZoneId)
 		} else {
 			logger.Info("Deleted Route53 alias record", "hostname", ghr.Spec.Hostname)
 		}
-		cancel()
 	}
 
 	// Step 2: Remove certificate ARN from Gateway annotation (triggers AWS LBC to update ALB)
@@ -341,7 +342,7 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 
 	// Step 4: Delete DNS validation records
 	if ghr.Status.CertificateArn != "" {
-		awsCtx, cancel := context.WithTimeout(ctx, AWSCallTimeout)
+		awsCtx, cancel := withAWSTimeout(ctx)
 		validationRecords, err := r.ACMClient.GetValidationRecords(awsCtx, ghr.Status.CertificateArn)
 		cancel()
 		if err == nil {
@@ -352,13 +353,14 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 					Value: vr.Value,
 					TTL:   300,
 				}
-				recordCtx, recordCancel := context.WithTimeout(ctx, AWSCallTimeout)
-				if err := r.Route53Client.DeleteRecord(recordCtx, ghr.Spec.ZoneId, record); err != nil {
+				recordCtx, recordCancel := withAWSTimeout(ctx)
+				err := r.Route53Client.DeleteRecord(recordCtx, ghr.Spec.ZoneId, record)
+				recordCancel()
+				if err != nil {
 					logger.Error(err, "Failed to delete validation record", 
 						"name", vr.Name,
 						"hostname", ghr.Spec.Hostname)
 				}
-				recordCancel()
 			}
 			logger.Info("Deleted DNS validation records", "hostname", ghr.Spec.Hostname)
 		}
@@ -385,15 +387,16 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 		}
 
 		// Step 6: Delete ACM certificate (only after confirmed not in use)
-		awsCtx, cancel := context.WithTimeout(ctx, AWSCallTimeout)
-		if err := r.ACMClient.DeleteCertificate(awsCtx, ghr.Status.CertificateArn); err != nil {
+		awsCtx, cancel := withAWSTimeout(ctx)
+		err = r.ACMClient.DeleteCertificate(awsCtx, ghr.Status.CertificateArn)
+		cancel()
+		if err != nil {
 			logger.Error(err, "Failed to delete ACM certificate", 
 				"arn", ghr.Status.CertificateArn,
 				"hostname", ghr.Spec.Hostname)
 		} else {
 			logger.Info("Deleted ACM certificate", "arn", ghr.Status.CertificateArn)
 		}
-		cancel()
 	}
 
 	// Step 7: Release DomainClaim
@@ -427,7 +430,7 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 
 // isCertificateInUse checks if the ACM certificate is still referenced by any resource (e.g., ALB listener)
 func (r *GatewayHostnameRequestReconciler) isCertificateInUse(ctx context.Context, certArn string) (bool, error) {
-	awsCtx, cancel := context.WithTimeout(ctx, AWSCallTimeout)
+	awsCtx, cancel := withAWSTimeout(ctx)
 	defer cancel()
 
 	details, err := r.ACMClient.DescribeCertificate(awsCtx, certArn)
@@ -502,14 +505,15 @@ func (r *GatewayHostnameRequestReconciler) cleanupForReprovisioning(ctx context.
 				EvaluateTargetHealth: true,
 			},
 		}
-		awsCtx, cancel := context.WithTimeout(ctx, AWSCallTimeout)
-		if err := r.Route53Client.DeleteRecord(awsCtx, ghr.Spec.ZoneId, aliasRecord); err != nil {
+		awsCtx, cancel := withAWSTimeout(ctx)
+		err := r.Route53Client.DeleteRecord(awsCtx, ghr.Spec.ZoneId, aliasRecord)
+		cancel()
+		if err != nil {
 			logger.Error(err, "Failed to delete Route53 alias record during reprovisioning", 
 				"hostname", ghr.Spec.Hostname)
 		} else {
 			logger.Info("Deleted Route53 alias record during reprovisioning", "hostname", ghr.Spec.Hostname)
 		}
-		cancel()
 	}
 
 	// Step 2: Remove certificate ARN from Gateway annotation
@@ -530,7 +534,7 @@ func (r *GatewayHostnameRequestReconciler) cleanupForReprovisioning(ctx context.
 
 	// Step 4: Delete DNS validation records
 	if ghr.Status.CertificateArn != "" {
-		awsCtx, cancel := context.WithTimeout(ctx, AWSCallTimeout)
+		awsCtx, cancel := withAWSTimeout(ctx)
 		validationRecords, err := r.ACMClient.GetValidationRecords(awsCtx, ghr.Status.CertificateArn)
 		cancel()
 		if err == nil {
@@ -541,12 +545,13 @@ func (r *GatewayHostnameRequestReconciler) cleanupForReprovisioning(ctx context.
 					Value: vr.Value,
 					TTL:   300,
 				}
-				recordCtx, recordCancel := context.WithTimeout(ctx, AWSCallTimeout)
-				if err := r.Route53Client.DeleteRecord(recordCtx, ghr.Spec.ZoneId, record); err != nil {
+				recordCtx, recordCancel := withAWSTimeout(ctx)
+				err := r.Route53Client.DeleteRecord(recordCtx, ghr.Spec.ZoneId, record)
+				recordCancel()
+				if err != nil {
 					logger.Error(err, "Failed to delete validation record during reprovisioning", 
 						"name", vr.Name)
 				}
-				recordCancel()
 			}
 			logger.Info("Deleted DNS validation records during reprovisioning", "hostname", ghr.Spec.Hostname)
 		}
@@ -554,14 +559,15 @@ func (r *GatewayHostnameRequestReconciler) cleanupForReprovisioning(ctx context.
 
 	// Step 5: Delete ACM certificate (best effort, may fail if still in use)
 	if ghr.Status.CertificateArn != "" {
-		awsCtx, cancel := context.WithTimeout(ctx, AWSCallTimeout)
-		if err := r.ACMClient.DeleteCertificate(awsCtx, ghr.Status.CertificateArn); err != nil {
+		awsCtx, cancel := withAWSTimeout(ctx)
+		err := r.ACMClient.DeleteCertificate(awsCtx, ghr.Status.CertificateArn)
+		cancel()
+		if err != nil {
 			logger.Error(err, "Failed to delete ACM certificate during reprovisioning (may still be in use)", 
 				"arn", ghr.Status.CertificateArn)
 		} else {
 			logger.Info("Deleted ACM certificate during reprovisioning", "arn", ghr.Status.CertificateArn)
 		}
-		cancel()
 	}
 
 	// Step 6: Release DomainClaim
@@ -683,7 +689,7 @@ func (r *GatewayHostnameRequestReconciler) validateAssignedResources(ctx context
 
 	// Check if ACM certificate still exists
 	if ghr.Status.CertificateArn != "" && meta.IsStatusConditionTrue(ghr.Status.Conditions, ConditionTypeCertificateIssued) {
-		awsCtx, cancel := context.WithTimeout(ctx, AWSCallTimeout)
+		awsCtx, cancel := withAWSTimeout(ctx)
 		certDetails, err := r.ACMClient.DescribeCertificate(awsCtx, ghr.Status.CertificateArn)
 		cancel()
 		if err != nil {

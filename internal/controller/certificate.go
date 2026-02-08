@@ -15,6 +15,12 @@ const (
 	AWSCallTimeout = 30 * time.Second
 )
 
+// withAWSTimeout returns a context with the standard AWS call timeout.
+// Always defer the cancel function to release resources.
+func withAWSTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, AWSCallTimeout)
+}
+
 // requestCertificate requests a new ACM certificate for the hostname
 func (r *GatewayHostnameRequestReconciler) requestCertificate(ctx context.Context, ghr *gatewayv1alpha1.GatewayHostnameRequest) (string, error) {
 	tags := map[string]string{
@@ -24,7 +30,7 @@ func (r *GatewayHostnameRequestReconciler) requestCertificate(ctx context.Contex
 		"environment": ghr.Spec.Environment,
 	}
 
-	awsCtx, cancel := context.WithTimeout(ctx, AWSCallTimeout)
+	awsCtx, cancel := withAWSTimeout(ctx)
 	defer cancel()
 
 	certArn, err := r.ACMClient.RequestCertificate(awsCtx, ghr.Spec.Hostname, tags)
@@ -42,7 +48,7 @@ func (r *GatewayHostnameRequestReconciler) ensureValidationRecords(ctx context.C
 		return fmt.Errorf("certificate ARN not set")
 	}
 
-	awsCtx, cancel := context.WithTimeout(ctx, AWSCallTimeout)
+	awsCtx, cancel := withAWSTimeout(ctx)
 	defer cancel()
 
 	// Get validation records from ACM
@@ -65,16 +71,16 @@ func (r *GatewayHostnameRequestReconciler) ensureValidationRecords(ctx context.C
 			TTL:   300,
 		}
 
-		recordCtx, recordCancel := context.WithTimeout(ctx, AWSCallTimeout)
-		if err := r.Route53Client.CreateOrUpdateRecord(recordCtx, ghr.Spec.ZoneId, record); err != nil {
-			recordCancel()
+		recordCtx, recordCancel := withAWSTimeout(ctx)
+		err := r.Route53Client.CreateOrUpdateRecord(recordCtx, ghr.Spec.ZoneId, record)
+		recordCancel()
+		if err != nil {
 			logger.Error(err, "Failed to create validation record", 
 				"name", record.Name, 
 				"zoneId", ghr.Spec.ZoneId,
 				"hostname", ghr.Spec.Hostname)
 			return fmt.Errorf("failed to create validation record: %w", err)
 		}
-		recordCancel()
 
 		logger.Info("Created validation record in Route53", 
 			"name", record.Name, 
@@ -94,7 +100,7 @@ func (r *GatewayHostnameRequestReconciler) checkCertificateStatus(ctx context.Co
 		return false, fmt.Errorf("certificate ARN not set")
 	}
 
-	awsCtx, cancel := context.WithTimeout(ctx, AWSCallTimeout)
+	awsCtx, cancel := withAWSTimeout(ctx)
 	defer cancel()
 
 	certDetails, err := r.ACMClient.DescribeCertificate(awsCtx, ghr.Status.CertificateArn)
