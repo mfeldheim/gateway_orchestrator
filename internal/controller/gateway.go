@@ -402,8 +402,8 @@ func (r *GatewayHostnameRequestReconciler) cleanupEmptyGateway(ctx context.Conte
 			continue
 		}
 		// Check both gateway name AND namespace to avoid cross-namespace confusion
-		if ghr.Status.AssignedGateway == gatewayName && 
-		   ghr.Status.AssignedGatewayNamespace == gatewayNamespace {
+		if ghr.Status.AssignedGateway == gatewayName &&
+			ghr.Status.AssignedGatewayNamespace == gatewayNamespace {
 			assignmentCount++
 		}
 	}
