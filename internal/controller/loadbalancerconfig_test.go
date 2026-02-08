@@ -1,276 +1,125 @@
 package controller
 
 import (
+	"context"
 	"sort"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	gatewayv1alpha1 "github.com/michelfeldheim/gateway-orchestrator/api/v1alpha1"
 )
 
-// TestEnsureLoadBalancerConfiguration_SortsCertificatesForDeterminism verifies that certificates
-// are sorted alphabetically to ensure deterministic default certificate selection.
-// This prevents the default certificate from flip-flopping when GatewayHostnameRequests
-// are reconciled in random order (fixes code review feedback).
+// TestEnsureLoadBalancerConfiguration_IncludesTargetTypeIP verifies that
+// ensureLoadBalancerConfiguration creates a LoadBalancerConfiguration with
+// targetGroupConfiguration.targetType set to "ip" to enable ClusterIP services.
+func TestEnsureLoadBalancerConfiguration_IncludesTargetTypeIP(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = gatewayv1alpha1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	reconciler := &GatewayHostnameRequestReconciler{
+		Client: fakeClient,
+	}
+
+	ctx := context.Background()
+	certificateARNs := []string{
+		"arn:aws:acm:eu-west-1:123456789012:certificate/test-cert",
+	}
+
+	// Call the controller method
+	err := reconciler.ensureLoadBalancerConfiguration(ctx, "gw-01", "edge", certificateARNs, "internet-facing", "")
+	if err != nil {
+		t.Fatalf("ensureLoadBalancerConfiguration() error = %v", err)
+	}
+
+	// Verify the LoadBalancerConfiguration was created
+	lbc := &unstructured.Unstructured{}
+	lbc.SetGroupVersionKind(LoadBalancerConfigurationGVK)
+	err = fakeClient.Get(ctx, types.NamespacedName{Name: "gw-01-config", Namespace: "edge"}, lbc)
+	if err != nil {
+		t.Fatalf("LoadBalancerConfiguration not found: %v", err)
+	}
+
+	// Extract spec and verify targetGroupConfiguration
+	spec, ok := lbc.Object["spec"].(map[string]interface{})
+	if !ok {
+		t.Fatal("spec not found or invalid type")
+	}
+
+	targetGroupConfig, ok := spec["targetGroupConfiguration"].(map[string]interface{})
+	if !ok {
+		t.Fatal("targetGroupConfiguration not found in spec")
+	}
+
+	targetType, ok := targetGroupConfig["targetType"].(string)
+	if !ok {
+		t.Fatal("targetType not found or not a string")
+	}
+
+	if targetType != "ip" {
+		t.Errorf("targetType = %q, want %q", targetType, "ip")
+	}
+}
+
+// TestEnsureLoadBalancerConfiguration_SortsCertificatesForDeterminism verifies that
+// certificates are sorted alphabetically to ensure the default certificate is deterministic
+// regardless of the order GatewayHostnameRequests are reconciled.
+//
+// This test uses a direct algorithm verification approach (not integration with fake client)
+// to avoid issues with unstructured object deep-copying in the fake client.
 func TestEnsureLoadBalancerConfiguration_SortsCertificatesForDeterminism(t *testing.T) {
 	tests := []struct {
-		name              string
-		inputCertificates []string
-		expectedFirst     string
-		description       string
+		name      string
+		certs     []string
+		wantFirst string
 	}{
 		{
-			name: "reverse_alphabetical_order",
-			inputCertificates: []string{
-				"arn:aws:acm:eu-west-1:123456789012:certificate/z-final",
-				"arn:aws:acm:eu-west-1:123456789012:certificate/a-first",
-				"arn:aws:acm:eu-west-1:123456789012:certificate/m-middle",
-			},
-			expectedFirst: "arn:aws:acm:eu-west-1:123456789012:certificate/a-first",
-			description:   "When GHRs reconciled in reverse order, default cert should still be 'a-first'",
+			name:      "reverse_order",
+			certs:     []string{"z-final", "a-first", "m-middle"},
+			wantFirst: "a-first",
 		},
 		{
-			name: "random_order_simulation",
-			inputCertificates: []string{
-				"arn:aws:acm:eu-west-1:123456789012:certificate/prod-cert",
-				"arn:aws:acm:eu-west-1:123456789012:certificate/app-cert",
-				"arn:aws:acm:eu-west-1:123456789012:certificate/base-cert",
-			},
-			expectedFirst: "arn:aws:acm:eu-west-1:123456789012:certificate/app-cert",
-			description:   "Real-world scenario: GHRs reconciled in random order",
+			name:      "random_order",
+			certs:     []string{"prod", "app", "base"},
+			wantFirst: "app",
 		},
 		{
-			name: "already_sorted_input",
-			inputCertificates: []string{
-				"arn:aws:acm:eu-west-1:123456789012:certificate/cert-01",
-				"arn:aws:acm:eu-west-1:123456789012:certificate/cert-02",
-				"arn:aws:acm:eu-west-1:123456789012:certificate/cert-03",
-			},
-			expectedFirst: "arn:aws:acm:eu-west-1:123456789012:certificate/cert-01",
-			description:   "When input is already sorted, ordering should be preserved",
+			name:      "already_sorted",
+			certs:     []string{"cert-01", "cert-02", "cert-03"},
+			wantFirst: "cert-01",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Simulate what ensureLoadBalancerConfiguration does:
-			// Copy input to avoid mutation, then sort
-			sortedCerts := make([]string, len(tt.inputCertificates))
-			copy(sortedCerts, tt.inputCertificates)
+			// Verify sorting algorithm matches what ensureLoadBalancerConfiguration does
+			sortedCerts := make([]string, len(tt.certs))
+			copy(sortedCerts, tt.certs)
 			sort.Strings(sortedCerts)
 
-			// Verify first cert matches expected
-			if sortedCerts[0] != tt.expectedFirst {
-				t.Errorf("%s: first certificate = %s, want %s",
-					tt.description, sortedCerts[0], tt.expectedFirst)
+			if len(sortedCerts) > 0 && sortedCerts[0] != tt.wantFirst {
+				t.Errorf("defaultCertificate = %q, want %q", sortedCerts[0], tt.wantFirst)
 			}
 
-			// Verify determinism: sorting again produces identical result
-			sortedCerts2 := make([]string, len(tt.inputCertificates))
-			copy(sortedCerts2, tt.inputCertificates)
-			sort.Strings(sortedCerts2)
+			// Verify determinism: sorting the same input multiple times yields same result
+			sortedAgain := make([]string, len(tt.certs))
+			copy(sortedAgain, tt.certs)
+			sort.Strings(sortedAgain)
 
-			for i, cert := range sortedCerts {
-				if cert != sortedCerts2[i] {
-					t.Errorf("non-deterministic sort at index %d: %s vs %s",
-						i, cert, sortedCerts2[i])
+			if len(sortedCerts) != len(sortedAgain) {
+				t.Errorf("sorting is not deterministic: different lengths")
+			}
+			for i, c := range sortedCerts {
+				if c != sortedAgain[i] {
+					t.Errorf("sorting is not deterministic at index %d: %q != %q", i, c, sortedAgain[i])
 				}
 			}
 		})
 	}
 }
 
-// TestCertificateSorting_PreservesDuplicatesAndOrder verifies that the sorting
-// implementation preserves certificate duplicates and doesn't lose certificates.
-// Real-world scenario: Multiple GatewayHostnameRequests might request the same
-// certificate (though rare, the controller should handle it gracefully).
-func TestCertificateSorting_PreservesDuplicatesAndOrder(t *testing.T) {
-	tests := []struct {
-		name           string
-		inputCerts     []string
-		expectedLength int
-		firstCert      string
-		description    string
-	}{
-		{
-			name: "with_duplicate_certificates",
-			inputCerts: []string{
-				"arn:aws:acm:eu-west-1:123456789012:certificate/cert-b",
-				"arn:aws:acm:eu-west-1:123456789012:certificate/cert-a",
-				"arn:aws:acm:eu-west-1:123456789012:certificate/cert-c",
-				"arn:aws:acm:eu-west-1:123456789012:certificate/cert-a", // duplicate
-			},
-			expectedLength: 4,
-			firstCert:      "arn:aws:acm:eu-west-1:123456789012:certificate/cert-a",
-			description:    "Duplicates should be preserved (edge case but must not crash)",
-		},
-		{
-			name: "all_unique_certificates",
-			inputCerts: []string{
-				"arn:aws:acm:eu-west-1:123456789012:certificate/api-cert",
-				"arn:aws:acm:eu-west-1:123456789012:certificate/web-cert",
-				"arn:aws:acm:eu-west-1:123456789012:certificate/admin-cert",
-			},
-			expectedLength: 3,
-			firstCert:      "arn:aws:acm:eu-west-1:123456789012:certificate/admin-cert",
-			description:    "Standard case: 3 unique certs from 3 GatewayHostnameRequests",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			sorted := make([]string, len(tt.inputCerts))
-			copy(sorted, tt.inputCerts)
-			sort.Strings(sorted)
-
-			// Verify no certs were lost/gained during sorting
-			if len(sorted) != tt.expectedLength {
-				t.Errorf("%s: length changed from %d to %d",
-					tt.description, tt.expectedLength, len(sorted))
-			}
-
-			// Verify first cert is deterministic
-			if sorted[0] != tt.firstCert {
-				t.Errorf("%s: first cert = %s, want %s",
-					tt.description, sorted[0], tt.firstCert)
-			}
-		})
-	}
-}
-
-// TestCertificateSorting_EdgeCasesWithFewCertificates tests real-world scenarios
-// with single and two certificates, ensuring the controller doesn't crash or
-// produce unexpected results with minimal certificate counts.
-func TestCertificateSorting_EdgeCasesWithFewCertificates(t *testing.T) {
-	tests := []struct {
-		name         string
-		certificates []string
-		expectFirst  string
-		description  string
-	}{
-		{
-			name:         "single_certificate",
-			certificates: []string{"arn:aws:acm:eu-west-1:123456789012:certificate/only-one"},
-			expectFirst:  "arn:aws:acm:eu-west-1:123456789012:certificate/only-one",
-			description:  "Single hostname: one cert",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			sorted := make([]string, len(tt.certificates))
-			copy(sorted, tt.certificates)
-			sort.Strings(sorted)
-
-			if len(sorted) > 0 && sorted[0] != tt.expectFirst {
-				t.Errorf("%s: first = %s, want %s", tt.description, sorted[0], tt.expectFirst)
-			}
-		})
-	}
-}
-
-// TestLoadBalancerConfiguration_IncludesTargetGroupConfiguration verifies that
-// LoadBalancerConfiguration includes targetGroupConfiguration.targetType set to "ip"
-// to support ClusterIP services (matching Ingress behavior).
-func TestLoadBalancerConfiguration_IncludesTargetGroupConfiguration(t *testing.T) {
-	tests := []struct {
-		name         string
-		description  string
-		expectedType string
-	}{
-		{
-			name:         "target_type_ip",
-			description:  "LoadBalancerConfiguration should use targetType: ip for ClusterIP support",
-			expectedType: "ip",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Build spec as ensureLoadBalancerConfiguration does
-			spec := map[string]interface{}{
-				"scheme": "internet-facing",
-				"listenerConfigurations": []interface{}{
-					map[string]interface{}{"protocolPort": "HTTP:80"},
-				},
-				"targetGroupConfiguration": map[string]interface{}{
-					"targetType": "ip",
-				},
-			}
-
-			// Verify targetGroupConfiguration exists
-			targetGroupConfig, ok := spec["targetGroupConfiguration"].(map[string]interface{})
-			if !ok {
-				t.Fatal("targetGroupConfiguration not found in spec")
-			}
-
-			// Verify targetType is set to "ip"
-			targetType, ok := targetGroupConfig["targetType"].(string)
-			if !ok {
-				t.Fatal("targetType not found in targetGroupConfiguration")
-			}
-
-			if targetType != tt.expectedType {
-				t.Errorf("%s: targetType = %s, want %s",
-					tt.description, targetType, tt.expectedType)
-			}
-		})
-	}
-}
-
-// TestCertificateSorting_EdgeCasesWithFewCertificates_continued tests with actual edge cases
-func TestCertificateSorting_EdgeCasesWithFewCertificates_continued(t *testing.T) {
-	tests := []struct {
-		name         string
-		certificates []string
-		expectFirst  string
-		description  string
-	}{
-		{
-			name:         "single_certificate",
-			certificates: []string{"arn:aws:acm:eu-west-1:123456789012:certificate/only-one"},
-			expectFirst:  "arn:aws:acm:eu-west-1:123456789012:certificate/only-one",
-			description:  "Single hostname request: one Gateway, one cert",
-		},
-		{
-			name: "two_certificates_reverse_order",
-			certificates: []string{
-				"arn:aws:acm:eu-west-1:123456789012:certificate/z-hostname",
-				"arn:aws:acm:eu-west-1:123456789012:certificate/a-hostname",
-			},
-			expectFirst: "arn:aws:acm:eu-west-1:123456789012:certificate/a-hostname",
-			description: "Two hostname requests: should select first alphabetically",
-		},
-		{
-			name: "two_certificates_correct_order",
-			certificates: []string{
-				"arn:aws:acm:eu-west-1:123456789012:certificate/a-hostname",
-				"arn:aws:acm:eu-west-1:123456789012:certificate/z-hostname",
-			},
-			expectFirst: "arn:aws:acm:eu-west-1:123456789012:certificate/a-hostname",
-			description: "Two hostname requests already in order: should preserve",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			sorted := make([]string, len(tt.certificates))
-			copy(sorted, tt.certificates)
-			sort.Strings(sorted)
-
-			// Verify length unchanged
-			if len(sorted) != len(tt.certificates) {
-				t.Errorf("%s: length changed %d -> %d",
-					tt.description, len(tt.certificates), len(sorted))
-			}
-
-			// Verify first cert correct
-			if len(sorted) > 0 && sorted[0] != tt.expectFirst {
-				t.Errorf("%s: first = %s, want %s",
-					tt.description, sorted[0], tt.expectFirst)
-			}
-
-			// Verify no panic/crash by accessing elements
-			for i := range sorted {
-				_ = sorted[i]
-			}
-		})
-	}
-}
