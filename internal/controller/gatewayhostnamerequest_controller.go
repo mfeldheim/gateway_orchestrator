@@ -533,7 +533,7 @@ func (r *GatewayHostnameRequestReconciler) ensureGatewayConfiguration(ctx contex
 	if visibility == "" {
 		visibility = "internet-facing"
 	}
-	
+
 	if err := r.syncLoadBalancerConfiguration(ctx, ghr.Status.AssignedGateway, ghr.Status.AssignedGatewayNamespace, visibility, ghr.Spec.WafArn, ghr.Status.CertificateArn); err != nil {
 		logger.Info("Failed to sync LoadBalancerConfiguration", "error", err)
 		return err

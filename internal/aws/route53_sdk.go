@@ -117,6 +117,10 @@ func (c *SDKRoute53Client) DeleteRecord(ctx context.Context, zoneId string, reco
 
 	_, err := c.client.ChangeResourceRecordSets(ctx, input)
 	if err != nil {
+		// Treat "record not found" as success (idempotent deletion)
+		if strings.Contains(err.Error(), "it was not found") {
+			return nil
+		}
 		return fmt.Errorf("failed to delete record: %w", err)
 	}
 

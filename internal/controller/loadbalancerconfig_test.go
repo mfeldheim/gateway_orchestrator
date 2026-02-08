@@ -140,16 +140,16 @@ func TestCertificateSorting_PreservesDuplicatesAndOrder(t *testing.T) {
 // produce unexpected results with minimal certificate counts.
 func TestCertificateSorting_EdgeCasesWithFewCertificates(t *testing.T) {
 	tests := []struct {
-		name           string
-		certificates   []string
-		expectFirst    string
-		description    string
+		name         string
+		certificates []string
+		expectFirst  string
+		description  string
 	}{
 		{
-			name:           "single_certificate",
-			certificates:   []string{"arn:aws:acm:eu-west-1:123456789012:certificate/only-one"},
-			expectFirst:    "arn:aws:acm:eu-west-1:123456789012:certificate/only-one",
-			description:    "Single hostname request: one Gateway, one cert",
+			name:         "single_certificate",
+			certificates: []string{"arn:aws:acm:eu-west-1:123456789012:certificate/only-one"},
+			expectFirst:  "arn:aws:acm:eu-west-1:123456789012:certificate/only-one",
+			description:  "Single hostname request: one Gateway, one cert",
 		},
 		{
 			name: "two_certificates_reverse_order",

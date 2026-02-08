@@ -149,11 +149,11 @@ func (p *Pool) CreateGateway(ctx context.Context, visibility string, wafArn stri
 	gw.Name = name
 	gw.Namespace = p.namespace
 	gw.Annotations = map[string]string{
-		"gateway.opendi.com/visibility":               visibility,
-		"gateway.opendi.com/certificate-count":        "0",
-		"gateway.opendi.com/rule-count":               "0",
+		"gateway.opendi.com/visibility":              visibility,
+		"gateway.opendi.com/certificate-count":       "0",
+		"gateway.opendi.com/rule-count":              "0",
 		"gateway.k8s.aws/loadbalancer-configuration": configName,
-		"gateway.opendi.com/waf-arn":                  wafArn,
+		"gateway.opendi.com/waf-arn":                 wafArn,
 	}
 	gw.Spec.GatewayClassName = gwapiv1.ObjectName(p.gatewayClass)
 

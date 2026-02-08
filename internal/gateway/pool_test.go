@@ -374,7 +374,7 @@ func TestPool_CreateGateway(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-				info, err := pool.CreateGateway(ctx, tt.visibility, "", tt.index)
+			info, err := pool.CreateGateway(ctx, tt.visibility, "", tt.index)
 			if err != nil {
 				t.Fatalf("CreateGateway() error = %v", err)
 			}

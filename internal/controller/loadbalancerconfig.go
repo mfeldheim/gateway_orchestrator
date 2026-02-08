@@ -48,14 +48,14 @@ func (r *GatewayHostnameRequestReconciler) ensureLoadBalancerConfiguration(
 
 	// Build listener configuration with certificates
 	listenerConfigs := []interface{}{}
-	
+
 	if len(certificateARNs) > 0 {
 		// Sort certificates for deterministic ordering (ensures same default cert on each reconcile)
 		// Make a copy to avoid mutating the input slice
 		sortedCerts := make([]string, len(certificateARNs))
 		copy(sortedCerts, certificateARNs)
 		sort.Strings(sortedCerts)
-		
+
 		// HTTPS listener with certificates
 		httpsListener := map[string]interface{}{
 			"protocolPort":       "HTTPS:443",
