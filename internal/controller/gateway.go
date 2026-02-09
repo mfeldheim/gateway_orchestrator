@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
@@ -287,6 +288,8 @@ func (r *GatewayHostnameRequestReconciler) ensureRoute53Alias(ctx context.Contex
 		EvaluateTargetHealth: true,
 	}
 
+	// Try both record types independently so partial progress is made even if one fails
+	var errs []error
 	for _, recordType := range []string{"A", "AAAA"} {
 		record := aws.DNSRecord{
 			Name:        ghr.Spec.Hostname,
@@ -295,8 +298,12 @@ func (r *GatewayHostnameRequestReconciler) ensureRoute53Alias(ctx context.Contex
 		}
 
 		if err := r.Route53Client.CreateOrUpdateRecord(ctx, ghr.Spec.ZoneId, record); err != nil {
-			return fmt.Errorf("failed to create Route53 %s ALIAS record: %w", recordType, err)
+			errs = append(errs, fmt.Errorf("%s: %w", recordType, err))
 		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("failed to create Route53 ALIAS records: %v", errors.Join(errs...))
 	}
 
 	logger.Info("Created Route53 ALIAS records (A + AAAA)",

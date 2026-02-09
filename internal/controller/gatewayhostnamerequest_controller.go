@@ -331,6 +331,7 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 			HostedZoneID:         r.getALBHostedZoneId(ghr.Status.AssignedLoadBalancer),
 			EvaluateTargetHealth: true,
 		}
+		var deleteErrors []string
 		for _, recordType := range []string{"A", "AAAA"} {
 			aliasRecord := aws.DNSRecord{
 				Name:        ghr.Spec.Hostname,
@@ -341,13 +342,20 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 			err := r.Route53Client.DeleteRecord(awsCtx, ghr.Spec.ZoneId, aliasRecord)
 			cancel()
 			if err != nil {
+				deleteErrors = append(deleteErrors, recordType)
 				logger.Error(err, "Failed to delete Route53 alias record",
 					"type", recordType,
 					"hostname", ghr.Spec.Hostname,
 					"zoneId", ghr.Spec.ZoneId)
 			}
 		}
-		logger.Info("Deleted Route53 alias records (A + AAAA)", "hostname", ghr.Spec.Hostname)
+		if len(deleteErrors) == 0 {
+			logger.Info("Deleted Route53 alias records (A + AAAA)", "hostname", ghr.Spec.Hostname)
+		} else {
+			logger.Info("Attempted deletion of Route53 alias records (A + AAAA); some failed",
+				"hostname", ghr.Spec.Hostname,
+				"failedTypes", deleteErrors)
+		}
 	}
 
 	// Step 2: Remove certificate ARN from Gateway annotation (triggers AWS LBC to update ALB)
@@ -597,6 +605,7 @@ func (r *GatewayHostnameRequestReconciler) cleanupForReprovisioning(ctx context.
 			HostedZoneID:         r.getALBHostedZoneId(ghr.Status.AssignedLoadBalancer),
 			EvaluateTargetHealth: true,
 		}
+		var deleteErrors []string
 		for _, recordType := range []string{"A", "AAAA"} {
 			aliasRecord := aws.DNSRecord{
 				Name:        ghr.Spec.Hostname,
@@ -607,12 +616,19 @@ func (r *GatewayHostnameRequestReconciler) cleanupForReprovisioning(ctx context.
 			err := r.Route53Client.DeleteRecord(awsCtx, ghr.Spec.ZoneId, aliasRecord)
 			cancel()
 			if err != nil {
+				deleteErrors = append(deleteErrors, recordType)
 				logger.Error(err, "Failed to delete Route53 alias record during reprovisioning",
 					"type", recordType,
 					"hostname", ghr.Spec.Hostname)
 			}
 		}
-		logger.Info("Deleted Route53 alias records (A + AAAA) during reprovisioning", "hostname", ghr.Spec.Hostname)
+		if len(deleteErrors) == 0 {
+			logger.Info("Deleted Route53 alias records (A + AAAA) during reprovisioning", "hostname", ghr.Spec.Hostname)
+		} else {
+			logger.Info("Attempted deletion of Route53 alias records (A + AAAA) during reprovisioning; some failed",
+				"hostname", ghr.Spec.Hostname,
+				"failedTypes", deleteErrors)
+		}
 	}
 
 	// Step 2: Remove certificate ARN from Gateway annotation
