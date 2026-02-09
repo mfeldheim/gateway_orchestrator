@@ -429,3 +429,23 @@ func (r *GatewayHostnameRequestReconciler) cleanupEmptyGateway(ctx context.Conte
 
 	return nil
 }
+
+// isGatewayEmpty checks whether a Gateway has any GHR assignments remaining,
+// excluding the specified GHR (which is being deleted).
+func (r *GatewayHostnameRequestReconciler) isGatewayEmpty(ctx context.Context, gatewayName, gatewayNamespace, excludeGHRNamespace, excludeGHRName string) (bool, error) {
+	var ghrList gatewayv1alpha1.GatewayHostnameRequestList
+	if err := r.List(ctx, &ghrList); err != nil {
+		return false, err
+	}
+
+	for _, ghr := range ghrList.Items {
+		if ghr.Namespace == excludeGHRNamespace && ghr.Name == excludeGHRName {
+			continue
+		}
+		if ghr.Status.AssignedGateway == gatewayName &&
+			ghr.Status.AssignedGatewayNamespace == gatewayNamespace {
+			return false, nil
+		}
+	}
+	return true, nil
+}

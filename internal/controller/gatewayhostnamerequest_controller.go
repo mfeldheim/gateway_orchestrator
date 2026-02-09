@@ -452,6 +452,20 @@ func (r *GatewayHostnameRequestReconciler) pollCertificateDetachment(ctx context
 			"arn", ghr.Status.CertificateArn)
 		// Fall through to attempt cert deletion
 	} else if inUse {
+		// If this is the last GHR on the Gateway, the ALB still holds the cert as its
+		// default certificate. The cert will never detach while the ALB exists.
+		// Proactively delete the Gateway to trigger ALB teardown.
+		if ghr.Status.AssignedGateway != "" && ghr.Status.AssignedGatewayNamespace != "" {
+			if empty, _ := r.isGatewayEmpty(ctx, ghr.Status.AssignedGateway, ghr.Status.AssignedGatewayNamespace, ghr.Namespace, ghr.Name); empty {
+				logger.Info("Certificate stuck on ALB and Gateway is empty, deleting Gateway to trigger ALB teardown",
+					"gateway", ghr.Status.AssignedGateway,
+					"arn", ghr.Status.CertificateArn)
+				if err := r.cleanupEmptyGateway(ctx, ghr.Status.AssignedGateway, ghr.Status.AssignedGatewayNamespace, ghr.Namespace, ghr.Name); err != nil {
+					logger.Error(err, "Failed to cleanup empty gateway during cert detach wait")
+				}
+			}
+		}
+
 		logger.Info("Certificate still in use by ALB, requeuing",
 			"arn", ghr.Status.CertificateArn,
 			"hostname", ghr.Spec.Hostname)
