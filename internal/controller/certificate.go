@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	gatewayv1alpha1 "github.com/michelfeldheim/gateway-orchestrator/api/v1alpha1"
@@ -24,11 +25,17 @@ func withAWSTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, AWSCallTimeout)
 }
 
+// sanitizeTagValue replaces characters not allowed in AWS tag values.
+// ACM tag values don't permit '*', which appears in wildcard hostnames like *.example.com.
+func sanitizeTagValue(s string) string {
+	return strings.ReplaceAll(s, "*", "wildcard")
+}
+
 // requestCertificate requests a new ACM certificate for the hostname
 func (r *GatewayHostnameRequestReconciler) requestCertificate(ctx context.Context, ghr *gatewayv1alpha1.GatewayHostnameRequest) (string, error) {
 	tags := map[string]string{
 		"managed-by":  "gateway-orchestrator",
-		"hostname":    ghr.Spec.Hostname,
+		"hostname":    sanitizeTagValue(ghr.Spec.Hostname),
 		"namespace":   ghr.Namespace,
 		"environment": ghr.Spec.Environment,
 	}
