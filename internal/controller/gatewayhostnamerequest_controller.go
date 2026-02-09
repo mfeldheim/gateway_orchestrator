@@ -296,20 +296,19 @@ func (r *GatewayHostnameRequestReconciler) reconcileNormal(ctx context.Context, 
 	return ctrl.Result{}, nil
 }
 
-// reconcileDelete handles cleanup when GatewayHostnameRequest is deleted
+// reconcileDelete handles cleanup when GatewayHostnameRequest is deleted.
+//
+// IMPORTANT: Status updates trigger informer events which cause immediate requeues.
+// To avoid a tight reconcile loop, we minimize status updates during deletion:
+// - No status update at the start (deletionTimestamp already indicates deletion)
+// - Only one conditional status update when waiting for cert detachment
+// - Re-fetch the object before any status update to avoid resourceVersion conflicts
 func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, ghr *gatewayv1alpha1.GatewayHostnameRequest) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	logger.Info("Deleting GatewayHostnameRequest", "hostname", ghr.Spec.Hostname)
 
 	if !controllerutil.ContainsFinalizer(ghr, FinalizerName) {
 		return ctrl.Result{}, nil
-	}
-
-	// Set deleting condition
-	r.setCondition(ghr, ConditionTypeDeleting, metav1.ConditionTrue, "DeletionInProgress", "Cleanup in progress")
-	if err := r.Status().Update(ctx, ghr); err != nil {
-		logger.Error(err, "Failed to update deleting condition")
-		// Continue anyway
 	}
 
 	// Step 1: Remove Route53 alias record (independent of cert, can happen anytime)
@@ -391,10 +390,22 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 			logger.Info("Certificate still in use by ALB, requeuing deletion",
 				"arn", ghr.Status.CertificateArn,
 				"hostname", ghr.Spec.Hostname)
-			r.setCondition(ghr, ConditionTypeDeleting, metav1.ConditionTrue, "WaitingForCertDetachment",
-				"Waiting for ALB to detach certificate")
-			if err := r.Status().Update(ctx, ghr); err != nil {
-				logger.Error(err, "Failed to update status")
+
+			// Only update status once to avoid triggering repeated informer events.
+			// Each Status().Update() creates an informer event → immediate requeue,
+			// so we skip the update if the condition already reflects the waiting state.
+			existingCond := meta.FindStatusCondition(ghr.Status.Conditions, ConditionTypeDeleting)
+			if existingCond == nil || existingCond.Reason != "WaitingForCertDetachment" {
+				// Re-fetch to get latest resourceVersion before updating status
+				if err := r.Get(ctx, client.ObjectKeyFromObject(ghr), ghr); err != nil {
+					// Object might be gone, just requeue
+					return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+				}
+				r.setCondition(ghr, ConditionTypeDeleting, metav1.ConditionTrue, "WaitingForCertDetachment",
+					"Waiting for ALB to detach certificate")
+				if err := r.Status().Update(ctx, ghr); err != nil {
+					logger.Error(err, "Failed to update status")
+				}
 			}
 			return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 		}
@@ -417,7 +428,7 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 		logger.Error(err, "Failed to delete domain claim")
 	}
 
-	// Step 7: Clean up Gateway if it's now empty (no other GHRs assigned)
+	// Step 8: Clean up Gateway if it's now empty (no other GHRs assigned)
 	// Pass current GHR info so it can be excluded from assignment count
 	if ghr.Status.AssignedGateway != "" && ghr.Status.AssignedGatewayNamespace != "" {
 		if err := r.cleanupEmptyGateway(ctx, ghr.Status.AssignedGateway, ghr.Status.AssignedGatewayNamespace, ghr.Namespace, ghr.Name); err != nil {
@@ -425,18 +436,13 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 			// Gateway cleanup failure should block deletion - requeue to retry
 			return ctrl.Result{}, err
 		}
-		// Clear assignment after successful cleanup
-		ghr.Status.AssignedGateway = ""
-		ghr.Status.AssignedGatewayNamespace = ""
-
-		// Persist status changes before removing finalizer
-		if err := r.Status().Update(ctx, ghr); err != nil {
-			logger.Error(err, "Failed to update status after clearing assignment")
-			return ctrl.Result{}, err
-		}
 	}
 
-	// Step 8: Remove finalizer
+	// Step 9: Remove finalizer
+	// Re-fetch to get latest resourceVersion (may have been updated in steps above)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(ghr), ghr); err != nil {
+		return ctrl.Result{}, err
+	}
 	controllerutil.RemoveFinalizer(ghr, FinalizerName)
 	if err := r.Update(ctx, ghr); err != nil {
 		return ctrl.Result{}, err
