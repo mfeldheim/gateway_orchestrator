@@ -117,8 +117,9 @@ spec:
                 type: object
                 x-kubernetes-map-type: atomic
               hostname:
-                description: Hostname is the FQDN to expose (e.g., test.opendi.com)
-                pattern: ^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}$
+                description: Hostname is the FQDN to expose (e.g., test.opendi.com
+                  or *.opendi.de for wildcard)
+                pattern: ^(\*\.)?([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}$
                 type: string
               visibility:
                 default: internet-facing

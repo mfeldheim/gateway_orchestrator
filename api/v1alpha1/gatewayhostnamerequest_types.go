@@ -10,9 +10,9 @@ type GatewayHostnameRequestSpec struct {
 	// +kubebuilder:validation:Required
 	ZoneId string `json:"zoneId"`
 
-	// Hostname is the FQDN to expose (e.g., test.opendi.com)
+	// Hostname is the FQDN to expose (e.g., test.opendi.com or *.opendi.de for wildcard)
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Pattern=`^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}$`
+	// +kubebuilder:validation:Pattern=`^(\*\.)?([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}$`
 	Hostname string `json:"hostname"`
 
 	// Environment is the logical environment (dev, staging, prod)

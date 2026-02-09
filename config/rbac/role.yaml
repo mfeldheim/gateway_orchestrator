@@ -4,7 +4,6 @@ kind: ClusterRole
 metadata:
   name: manager-role
 rules:
-# Namespace permissions - required for controller caching/watching
 - apiGroups:
   - ""
   resources:
@@ -15,13 +14,22 @@ rules:
   - patch
   - update
   - watch
-# Gateway Orchestrator CRDs
+- apiGroups:
+  - gateway.networking.k8s.io
+  resources:
+  - gateways
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - gateway.opendi.com
   resources:
   - domainclaims
   - gatewayhostnamerequests
-  - hostnamegrants
   verbs:
   - create
   - delete
@@ -30,79 +38,17 @@ rules:
   - patch
   - update
   - watch
-# Gateway Orchestrator CRD status subresources
+- apiGroups:
+  - gateway.opendi.com
+  resources:
+  - gatewayhostnamerequests/finalizers
+  verbs:
+  - update
 - apiGroups:
   - gateway.opendi.com
   resources:
   - gatewayhostnamerequests/status
-  - gatewayhostnamerequests/finalizers
-  - hostnamegrants/status
   verbs:
   - get
   - patch
   - update
-# Gateway API resources
-- apiGroups:
-  - gateway.networking.k8s.io
-  resources:
-  - gateways
-  - gatewayclasses
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-# Gateway API status subresources
-- apiGroups:
-  - gateway.networking.k8s.io
-  resources:
-  - gateways/status
-  verbs:
-  - get
-  - patch
-  - update
-# AWS Load Balancer Controller configuration CRDs
-- apiGroups:
-  - gateway.k8s.aws
-  resources:
-  - loadbalancerconfigurations
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-# Events for observability
-- apiGroups:
-  - ""
-  resources:
-  - events
-  verbs:
-  - create
-  - patch
-# Services for Gateway status inspection
-- apiGroups:
-  - ""
-  resources:
-  - services
-  verbs:
-  - get
-  - list
-  - watch
-# Leader election (coordination.k8s.io)
-- apiGroups:
-  - coordination.k8s.io
-  resources:
-  - leases
-  verbs:
-  - create
-  - get
-  - list
-  - patch
-  - update
-  - watch
