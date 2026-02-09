@@ -298,18 +298,31 @@ func (r *GatewayHostnameRequestReconciler) reconcileNormal(ctx context.Context, 
 
 // reconcileDelete handles cleanup when GatewayHostnameRequest is deleted.
 //
-// IMPORTANT: Status updates trigger informer events which cause immediate requeues.
-// To avoid a tight reconcile loop, we minimize status updates during deletion:
-// - No status update at the start (deletionTimestamp already indicates deletion)
-// - Only one conditional status update when waiting for cert detachment
-// - Re-fetch the object before any status update to avoid resourceVersion conflicts
+// Deletion follows a two-phase approach to avoid tight reconcile loops:
+//
+// Phase 1 (first reconcile): Run all cleanup steps, then check cert-in-use.
+// Phase 2 (subsequent reconciles): If already waiting for cert detachment,
+// skip all cleanup (already done) and only poll cert status.
+//
+// This prevents repeated AWS API calls and K8s object modifications on every
+// reconcile while waiting for the ALB to release the certificate.
 func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, ghr *gatewayv1alpha1.GatewayHostnameRequest) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	logger.Info("Deleting GatewayHostnameRequest", "hostname", ghr.Spec.Hostname)
 
 	if !controllerutil.ContainsFinalizer(ghr, FinalizerName) {
 		return ctrl.Result{}, nil
 	}
+
+	// Phase 2: If we're already waiting for cert detachment, skip cleanup and just poll.
+	// Cleanup was already performed in the first reconcile — re-running it would make
+	// unnecessary AWS calls and K8s object updates on every poll cycle.
+	existingCond := meta.FindStatusCondition(ghr.Status.Conditions, ConditionTypeDeleting)
+	if existingCond != nil && existingCond.Reason == "WaitingForCertDetachment" {
+		return r.pollCertificateDetachment(ctx, ghr)
+	}
+
+	// Phase 1: First reconcile — perform all cleanup steps
+	logger.Info("Deleting GatewayHostnameRequest", "hostname", ghr.Spec.Hostname)
 
 	// Step 1: Remove Route53 alias record (independent of cert, can happen anytime)
 	if ghr.Status.AssignedLoadBalancer != "" {
@@ -378,7 +391,7 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 		}
 	}
 
-	// Step 5: Check if certificate is still in use by ALB before deletion
+	// Step 5: Check if certificate is still in use by ALB
 	if ghr.Status.CertificateArn != "" {
 		inUse, err := r.isCertificateInUse(ctx, ghr.Status.CertificateArn)
 		if err != nil {
@@ -387,25 +400,22 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 				"hostname", ghr.Spec.Hostname)
 			// Continue with deletion attempt - best effort
 		} else if inUse {
-			logger.Info("Certificate still in use by ALB, requeuing deletion",
+			logger.Info("Certificate still in use by ALB, will poll for detachment",
 				"arn", ghr.Status.CertificateArn,
 				"hostname", ghr.Spec.Hostname)
 
-			// Only update status once to avoid triggering repeated informer events.
-			// Each Status().Update() creates an informer event → immediate requeue,
-			// so we skip the update if the condition already reflects the waiting state.
-			existingCond := meta.FindStatusCondition(ghr.Status.Conditions, ConditionTypeDeleting)
-			if existingCond == nil || existingCond.Reason != "WaitingForCertDetachment" {
-				// Re-fetch to get latest resourceVersion before updating status
-				if err := r.Get(ctx, client.ObjectKeyFromObject(ghr), ghr); err != nil {
-					// Object might be gone, just requeue
-					return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
-				}
-				r.setCondition(ghr, ConditionTypeDeleting, metav1.ConditionTrue, "WaitingForCertDetachment",
-					"Waiting for ALB to detach certificate")
-				if err := r.Status().Update(ctx, ghr); err != nil {
-					logger.Error(err, "Failed to update status")
-				}
+			// Set the WaitingForCertDetachment condition so subsequent reconciles
+			// enter Phase 2 (poll-only) instead of re-running cleanup.
+			// Re-fetch to get latest resourceVersion before status update.
+			if err := r.Get(ctx, client.ObjectKeyFromObject(ghr), ghr); err != nil {
+				return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+			}
+			r.setCondition(ghr, ConditionTypeDeleting, metav1.ConditionTrue, "WaitingForCertDetachment",
+				"Waiting for ALB to detach certificate")
+			if err := r.Status().Update(ctx, ghr); err != nil {
+				// Status update failed — the condition won't be set, so next reconcile
+				// will re-run cleanup (Phase 1). This is safe because all steps are idempotent.
+				logger.Error(err, "Failed to set WaitingForCertDetachment condition, will retry cleanup")
 			}
 			return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 		}
@@ -423,23 +433,68 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 		}
 	}
 
+	return r.finalizeDeletion(ctx, ghr)
+}
+
+// pollCertificateDetachment checks if the ALB has released the certificate.
+// Called on subsequent reconciles after cleanup is already done (Phase 2).
+func (r *GatewayHostnameRequestReconciler) pollCertificateDetachment(ctx context.Context, ghr *gatewayv1alpha1.GatewayHostnameRequest) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	if ghr.Status.CertificateArn == "" {
+		// No certificate to wait for — proceed to finalize
+		return r.finalizeDeletion(ctx, ghr)
+	}
+
+	inUse, err := r.isCertificateInUse(ctx, ghr.Status.CertificateArn)
+	if err != nil {
+		logger.Error(err, "Failed to check certificate usage, attempting deletion anyway",
+			"arn", ghr.Status.CertificateArn)
+		// Fall through to attempt cert deletion
+	} else if inUse {
+		logger.Info("Certificate still in use by ALB, requeuing",
+			"arn", ghr.Status.CertificateArn,
+			"hostname", ghr.Spec.Hostname)
+		// No status update needed — condition is already set. Just wait.
+		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+	}
+
+	// Certificate is no longer in use — delete it
+	logger.Info("Certificate detached from ALB, deleting",
+		"arn", ghr.Status.CertificateArn,
+		"hostname", ghr.Spec.Hostname)
+	awsCtx, cancel := withAWSTimeout(ctx)
+	err = r.ACMClient.DeleteCertificate(awsCtx, ghr.Status.CertificateArn)
+	cancel()
+	if err != nil {
+		logger.Error(err, "Failed to delete ACM certificate",
+			"arn", ghr.Status.CertificateArn,
+			"hostname", ghr.Spec.Hostname)
+	} else {
+		logger.Info("Deleted ACM certificate", "arn", ghr.Status.CertificateArn)
+	}
+
+	return r.finalizeDeletion(ctx, ghr)
+}
+
+// finalizeDeletion releases the DomainClaim, cleans up empty Gateways, and removes the finalizer.
+func (r *GatewayHostnameRequestReconciler) finalizeDeletion(ctx context.Context, ghr *gatewayv1alpha1.GatewayHostnameRequest) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
 	// Step 7: Release DomainClaim
 	if err := r.deleteDomainClaim(ctx, ghr); err != nil {
 		logger.Error(err, "Failed to delete domain claim")
 	}
 
 	// Step 8: Clean up Gateway if it's now empty (no other GHRs assigned)
-	// Pass current GHR info so it can be excluded from assignment count
 	if ghr.Status.AssignedGateway != "" && ghr.Status.AssignedGatewayNamespace != "" {
 		if err := r.cleanupEmptyGateway(ctx, ghr.Status.AssignedGateway, ghr.Status.AssignedGatewayNamespace, ghr.Namespace, ghr.Name); err != nil {
 			logger.Error(err, "Failed to cleanup empty gateway", "gateway", ghr.Status.AssignedGateway)
-			// Gateway cleanup failure should block deletion - requeue to retry
 			return ctrl.Result{}, err
 		}
 	}
 
 	// Step 9: Remove finalizer
-	// Re-fetch to get latest resourceVersion (may have been updated in steps above)
 	if err := r.Get(ctx, client.ObjectKeyFromObject(ghr), ghr); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -450,7 +505,6 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 
 	logger.Info("Successfully deleted GatewayHostnameRequest", "hostname", ghr.Spec.Hostname)
 	return ctrl.Result{}, nil
-
 }
 
 // isCertificateInUse checks if the ACM certificate is still referenced by any resource (e.g., ALB listener)
