@@ -127,6 +127,11 @@ func (r *GatewayHostnameRequestReconciler) getGatewayCertificateARNs(ctx context
 
 	arns := []string{}
 	for _, ghr := range ghrList.Items {
+		// Skip GHRs that are being deleted — their certs should not be included
+		// so the ALB can detach them.
+		if !ghr.DeletionTimestamp.IsZero() {
+			continue
+		}
 		if ghr.Status.AssignedGateway == gatewayName &&
 			ghr.Status.AssignedGatewayNamespace == gatewayNamespace &&
 			ghr.Status.CertificateArn != "" {
