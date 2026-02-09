@@ -92,7 +92,9 @@ func (r *GatewayHostnameRequestReconciler) deleteDomainClaim(ctx context.Context
 
 // generateClaimName creates a deterministic name for a DomainClaim
 func generateClaimName(zoneId, hostname string) string {
+	// Sanitize hostname: replace * with 'wildcard' for valid K8s name
+	sanitized := strings.ReplaceAll(hostname, "*", "wildcard")
 	// Use a simple naming scheme: zone-hostname
 	// In production, might want to hash long names
-	return fmt.Sprintf("%s-%s", strings.ToLower(zoneId), strings.ToLower(hostname))
+	return fmt.Sprintf("%s-%s", strings.ToLower(zoneId), strings.ToLower(sanitized))
 }
