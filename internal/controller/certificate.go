@@ -25,14 +25,17 @@ func withAWSTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, AWSCallTimeout)
 }
 
+// sanitizeTagValue replaces characters not allowed in AWS tag values.
+// ACM tag values don't permit '*', which appears in wildcard hostnames like *.example.com.
+func sanitizeTagValue(s string) string {
+	return strings.ReplaceAll(s, "*", "wildcard")
+}
+
 // requestCertificate requests a new ACM certificate for the hostname
 func (r *GatewayHostnameRequestReconciler) requestCertificate(ctx context.Context, ghr *gatewayv1alpha1.GatewayHostnameRequest) (string, error) {
-	// Sanitize hostname for ACM tag (ACM doesn't allow * in tag values)
-	sanitizedHostname := strings.ReplaceAll(ghr.Spec.Hostname, "*", "wildcard")
-	
 	tags := map[string]string{
 		"managed-by":  "gateway-orchestrator",
-		"hostname":    sanitizedHostname,
+		"hostname":    sanitizeTagValue(ghr.Spec.Hostname),
 		"namespace":   ghr.Namespace,
 		"environment": ghr.Spec.Environment,
 	}

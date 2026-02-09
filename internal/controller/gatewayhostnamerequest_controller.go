@@ -324,26 +324,37 @@ func (r *GatewayHostnameRequestReconciler) reconcileDelete(ctx context.Context, 
 	// Phase 1: First reconcile — perform all cleanup steps
 	logger.Info("Deleting GatewayHostnameRequest", "hostname", ghr.Spec.Hostname)
 
-	// Step 1: Remove Route53 alias record (independent of cert, can happen anytime)
+	// Step 1: Remove Route53 alias records (A + AAAA, independent of cert, can happen anytime)
 	if ghr.Status.AssignedLoadBalancer != "" {
-		aliasRecord := aws.DNSRecord{
-			Name: ghr.Spec.Hostname,
-			Type: "A",
-			AliasTarget: &aws.AliasTarget{
-				DNSName:              ghr.Status.AssignedLoadBalancer,
-				HostedZoneID:         r.getALBHostedZoneId(ghr.Status.AssignedLoadBalancer),
-				EvaluateTargetHealth: true,
-			},
+		aliasTarget := &aws.AliasTarget{
+			DNSName:              ghr.Status.AssignedLoadBalancer,
+			HostedZoneID:         r.getALBHostedZoneId(ghr.Status.AssignedLoadBalancer),
+			EvaluateTargetHealth: true,
 		}
-		awsCtx, cancel := withAWSTimeout(ctx)
-		err := r.Route53Client.DeleteRecord(awsCtx, ghr.Spec.ZoneId, aliasRecord)
-		cancel()
-		if err != nil {
-			logger.Error(err, "Failed to delete Route53 alias record",
-				"hostname", ghr.Spec.Hostname,
-				"zoneId", ghr.Spec.ZoneId)
+		var deleteErrors []string
+		for _, recordType := range []string{"A", "AAAA"} {
+			aliasRecord := aws.DNSRecord{
+				Name:        ghr.Spec.Hostname,
+				Type:        recordType,
+				AliasTarget: aliasTarget,
+			}
+			awsCtx, cancel := withAWSTimeout(ctx)
+			err := r.Route53Client.DeleteRecord(awsCtx, ghr.Spec.ZoneId, aliasRecord)
+			cancel()
+			if err != nil {
+				deleteErrors = append(deleteErrors, recordType)
+				logger.Error(err, "Failed to delete Route53 alias record",
+					"type", recordType,
+					"hostname", ghr.Spec.Hostname,
+					"zoneId", ghr.Spec.ZoneId)
+			}
+		}
+		if len(deleteErrors) == 0 {
+			logger.Info("Deleted Route53 alias records (A + AAAA)", "hostname", ghr.Spec.Hostname)
 		} else {
-			logger.Info("Deleted Route53 alias record", "hostname", ghr.Spec.Hostname)
+			logger.Info("Attempted deletion of Route53 alias records (A + AAAA); some failed",
+				"hostname", ghr.Spec.Hostname,
+				"failedTypes", deleteErrors)
 		}
 	}
 
@@ -587,25 +598,36 @@ func (r *GatewayHostnameRequestReconciler) cleanupForReprovisioning(ctx context.
 	logger := log.FromContext(ctx)
 	logger.Info("Cleaning up resources for reprovisioning", "hostname", ghr.Spec.Hostname)
 
-	// Step 1: Remove Route53 alias record
+	// Step 1: Remove Route53 alias records (A + AAAA)
 	if ghr.Status.AssignedLoadBalancer != "" {
-		aliasRecord := aws.DNSRecord{
-			Name: ghr.Spec.Hostname,
-			Type: "A",
-			AliasTarget: &aws.AliasTarget{
-				DNSName:              ghr.Status.AssignedLoadBalancer,
-				HostedZoneID:         r.getALBHostedZoneId(ghr.Status.AssignedLoadBalancer),
-				EvaluateTargetHealth: true,
-			},
+		aliasTarget := &aws.AliasTarget{
+			DNSName:              ghr.Status.AssignedLoadBalancer,
+			HostedZoneID:         r.getALBHostedZoneId(ghr.Status.AssignedLoadBalancer),
+			EvaluateTargetHealth: true,
 		}
-		awsCtx, cancel := withAWSTimeout(ctx)
-		err := r.Route53Client.DeleteRecord(awsCtx, ghr.Spec.ZoneId, aliasRecord)
-		cancel()
-		if err != nil {
-			logger.Error(err, "Failed to delete Route53 alias record during reprovisioning",
-				"hostname", ghr.Spec.Hostname)
+		var deleteErrors []string
+		for _, recordType := range []string{"A", "AAAA"} {
+			aliasRecord := aws.DNSRecord{
+				Name:        ghr.Spec.Hostname,
+				Type:        recordType,
+				AliasTarget: aliasTarget,
+			}
+			awsCtx, cancel := withAWSTimeout(ctx)
+			err := r.Route53Client.DeleteRecord(awsCtx, ghr.Spec.ZoneId, aliasRecord)
+			cancel()
+			if err != nil {
+				deleteErrors = append(deleteErrors, recordType)
+				logger.Error(err, "Failed to delete Route53 alias record during reprovisioning",
+					"type", recordType,
+					"hostname", ghr.Spec.Hostname)
+			}
+		}
+		if len(deleteErrors) == 0 {
+			logger.Info("Deleted Route53 alias records (A + AAAA) during reprovisioning", "hostname", ghr.Spec.Hostname)
 		} else {
-			logger.Info("Deleted Route53 alias record during reprovisioning", "hostname", ghr.Spec.Hostname)
+			logger.Info("Attempted deletion of Route53 alias records (A + AAAA) during reprovisioning; some failed",
+				"hostname", ghr.Spec.Hostname,
+				"failedTypes", deleteErrors)
 		}
 	}
 

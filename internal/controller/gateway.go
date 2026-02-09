@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
@@ -279,22 +280,33 @@ func (r *GatewayHostnameRequestReconciler) ensureRoute53Alias(ctx context.Contex
 	// Update status with LoadBalancer info
 	ghr.Status.AssignedLoadBalancer = lbDNS
 
-	// Create Route53 ALIAS record
-	record := aws.DNSRecord{
-		Name: ghr.Spec.Hostname,
-		Type: "A", // ALIAS record for A record type
-		AliasTarget: &aws.AliasTarget{
-			DNSName:              lbDNS,
-			HostedZoneID:         hostedZoneID,
-			EvaluateTargetHealth: true,
-		},
+	// Create Route53 ALIAS records for both A (IPv4) and AAAA (IPv6)
+	// ALBs are dual-stack, so we create both record types pointing to the same ALB
+	aliasTarget := &aws.AliasTarget{
+		DNSName:              lbDNS,
+		HostedZoneID:         hostedZoneID,
+		EvaluateTargetHealth: true,
 	}
 
-	if err := r.Route53Client.CreateOrUpdateRecord(ctx, ghr.Spec.ZoneId, record); err != nil {
-		return fmt.Errorf("failed to create Route53 ALIAS record: %w", err)
+	// Try both record types independently so partial progress is made even if one fails
+	var errs []error
+	for _, recordType := range []string{"A", "AAAA"} {
+		record := aws.DNSRecord{
+			Name:        ghr.Spec.Hostname,
+			Type:        recordType,
+			AliasTarget: aliasTarget,
+		}
+
+		if err := r.Route53Client.CreateOrUpdateRecord(ctx, ghr.Spec.ZoneId, record); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", recordType, err))
+		}
 	}
 
-	logger.Info("Created Route53 ALIAS record",
+	if len(errs) > 0 {
+		return fmt.Errorf("failed to create Route53 ALIAS records: %v", errors.Join(errs...))
+	}
+
+	logger.Info("Created Route53 ALIAS records (A + AAAA)",
 		"hostname", ghr.Spec.Hostname,
 		"target", lbDNS,
 		"region", region,
