@@ -279,22 +279,27 @@ func (r *GatewayHostnameRequestReconciler) ensureRoute53Alias(ctx context.Contex
 	// Update status with LoadBalancer info
 	ghr.Status.AssignedLoadBalancer = lbDNS
 
-	// Create Route53 ALIAS record
-	record := aws.DNSRecord{
-		Name: ghr.Spec.Hostname,
-		Type: "A", // ALIAS record for A record type
-		AliasTarget: &aws.AliasTarget{
-			DNSName:              lbDNS,
-			HostedZoneID:         hostedZoneID,
-			EvaluateTargetHealth: true,
-		},
+	// Create Route53 ALIAS records for both A (IPv4) and AAAA (IPv6)
+	// ALBs are dual-stack, so we create both record types pointing to the same ALB
+	aliasTarget := &aws.AliasTarget{
+		DNSName:              lbDNS,
+		HostedZoneID:         hostedZoneID,
+		EvaluateTargetHealth: true,
 	}
 
-	if err := r.Route53Client.CreateOrUpdateRecord(ctx, ghr.Spec.ZoneId, record); err != nil {
-		return fmt.Errorf("failed to create Route53 ALIAS record: %w", err)
+	for _, recordType := range []string{"A", "AAAA"} {
+		record := aws.DNSRecord{
+			Name:        ghr.Spec.Hostname,
+			Type:        recordType,
+			AliasTarget: aliasTarget,
+		}
+
+		if err := r.Route53Client.CreateOrUpdateRecord(ctx, ghr.Spec.ZoneId, record); err != nil {
+			return fmt.Errorf("failed to create Route53 %s ALIAS record: %w", recordType, err)
+		}
 	}
 
-	logger.Info("Created Route53 ALIAS record",
+	logger.Info("Created Route53 ALIAS records (A + AAAA)",
 		"hostname", ghr.Spec.Hostname,
 		"target", lbDNS,
 		"region", region,
